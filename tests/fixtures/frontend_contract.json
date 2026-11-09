@@ -208,8 +208,8 @@
       },
       {
         "old": "js/55_v241_course_adaptive_ta.js",
-        "query": "v=R18m-20261109",
-        "sha256": "2da33e1b60dbc601ba2dfb8d7611a0fac4a155fd987e048cb5f10583f7e29b77",
+        "query": "v=R18o-20261109",
+        "sha256": "3a192333417d18dfe94291cd976562cfb76f7c3b4050d6e6d38a04fe77a6997f",
         "new": "shared/js/course/course-controller.js",
         "previous_sha256": "bad39c56c62505ca5ce92bf96ef77b6ac7a941f8f3468cdb21ee85d13de8102f"
       },
@@ -222,8 +222,8 @@
       {
         "old": "shared/js/qa/gemini-live.js",
         "new": "shared/js/qa/gemini-live.js",
-        "sha256": "38341da6dd5015edc896ef8fb6319ae288929d62c980cd2c59fd3b6e616ac7c8",
-        "query": "v=R18b-20261106"
+        "sha256": "04d3c6b7907480e344ebe4bcd0ec71732ccebd1c368da8c7697af5407873fe86",
+        "query": "v=R18o-20261109"
       },
       {
         "old": "shared/js/course/upload-diagnostics.js",
@@ -498,8 +498,8 @@
       },
       {
         "old": "js/55_v241_course_adaptive_ta.js",
-        "query": "v=R18m-20261109",
-        "sha256": "2da33e1b60dbc601ba2dfb8d7611a0fac4a155fd987e048cb5f10583f7e29b77",
+        "query": "v=R18o-20261109",
+        "sha256": "3a192333417d18dfe94291cd976562cfb76f7c3b4050d6e6d38a04fe77a6997f",
         "new": "shared/js/course/course-controller.js",
         "previous_sha256": "bad39c56c62505ca5ce92bf96ef77b6ac7a941f8f3468cdb21ee85d13de8102f"
       },

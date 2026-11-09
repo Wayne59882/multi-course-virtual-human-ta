@@ -64,7 +64,7 @@ function injectUI(){
   left.appendChild(controls);if(grid)left.appendChild(grid);
   const box=document.createElement('div');box.className='vq-qa-col vq-live';box.id='vqLivePanel';
   box.innerHTML='<div class="section-label">NATURAL CONVERSATION</div>'+
-    '<div class="vq-live-row"><input id="vqLiveKey" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Paste your Gemini API key">'+
+    '<div class="vq-live-row"><input id="vqLiveKey" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore autocapitalize="none" spellcheck="false" placeholder="Paste your Gemini API key">'+
     '<button type="button" class="secondary" id="vqLiveKeyBtn">Confirm Key</button><button type="button" class="secondary" id="vqLiveClearBtn">Clear</button></div>'+
     '<div class="vq-live-row"><button type="button" class="primary" id="vqLiveStart">🗣 Start Natural Conversation</button>'+
     '<button type="button" class="danger" id="vqLiveStop" disabled>■ End Conversation</button></div>'+

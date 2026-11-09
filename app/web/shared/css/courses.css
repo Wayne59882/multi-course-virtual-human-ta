@@ -51,3 +51,5 @@
 .v241-builds{display:grid;gap:8px;margin-top:12px}.v241-builds[hidden]{display:none}.v241-build{margin-top:0}
 .v241-prep-head .v241-prep-error{background:#f3e8e8;color:#8f2f2f}.v241-prep-head .v241-prep-waiting{background:#eef2f6;color:#5b7087}
 .v241-build .v241-prep-label{font-weight:600;color:#42617e;overflow-wrap:anywhere}
+.v241-build .v241-prep-head small{font-weight:500;color:#6b7f93;margin-left:4px}
+.v241-build-cancel{font:inherit;font-size:12px!important;font-weight:700!important;border:1px solid #e3b4b4!important;background:#fff;color:#a12d2d;border-radius:8px!important;padding:3px 9px!important;box-shadow:none!important;cursor:pointer;min-height:0!important}

@@ -80,7 +80,11 @@ with tempfile.TemporaryDirectory() as temporary:
     for job_id, status_value, created in [('old-done', 'done', now - 50), ('running', 'running', now - 10), ('queued', 'queued', now - 5), ('failed-long-ago', 'error', now - 200000)]:
         cr._json_dump(cr.COURSE_ROOT / '_jobs' / (job_id + '.json'), {'id': job_id, 'status': status_value, 'course_name': job_id, 'progress': 40, 'message': 'Reading page 3', 'created_at': created, 'updated_at': created})
     assert [row['id'] for row in manager.active_builds()] == ['queued', 'running']
+    assert all('files' in row and 'page_methods' in row for row in manager.active_builds())
 controller = (ROOT / 'app/web/shared/js/course/course-controller.js').read_text(encoding='utf-8')
 assert 'offset+8*1024*1024' in controller and 'waitForInspection(' in controller and "'/api/reference/course-builds'" in controller
-assert "DRAFT_KEY='current:'+id" in controller
+assert "DRAFT_KEY='current:'+id" in controller and 'v241-build-cancel' in controller
+# The browser must not fill a saved login into the course name or a saved password into API key boxes.
+assert 'id="v241CourseName" type="text" name="vq-course-title" autocomplete="off"' in controller
+assert 'id="cloudApiKeyInput" type="password" autocomplete="new-password"' in (ROOT / 'app/web/reference/index.html').read_text(encoding='utf-8')
 print('[OK] background inspection: the last chunk answers at once, the page polls until units are found, errors are reported; 8 MB chunks; builds in progress listed')

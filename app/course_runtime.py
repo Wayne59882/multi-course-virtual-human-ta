@@ -14,6 +14,13 @@ from ollama_cancel import BackgroundWork, PAUSED
 from pdf_vision import LocalVision
 
 
+def _duration(seconds):
+    seconds=max(0,int(seconds or 0))
+    if seconds<90:return '1 min'
+    if seconds<5400:return '%d min'%round(seconds/60.0)
+    return '%.1f h'%(seconds/3600.0)
+
+
 def _shared_pages(stage_directory,identity):
     """Page readings are kept by PDF content, so uploading the same PDF again (any teacher, any
     stage) reuses every page already read. Readings an earlier upload left in its own stage
@@ -836,7 +843,11 @@ class CourseManager(object):
         for job in out.values():
             status=job.get('status')
             if status in ('queued','running') or (status=='error' and now-float(job.get('updated_at') or 0)<86400):
-                rows.append({'id':job.get('id'),'course_id':job.get('course_id') or '','course_name':job.get('course_name') or 'Uploaded course','status':status,
+                files=[]
+                try:files=[src.get('display_name') or src.get('file_name') for src in json.loads((self._stage_dir(job.get('stage_id') or '')/'stage.json').read_text(encoding='utf-8')).get('sources') or []]
+                except Exception:pass
+                rows.append({'id':job.get('id'),'course_id':job.get('course_id') or '','course_name':job.get('course_name') or '','files':files[:5],'status':status,
+                             'page_methods':job.get('page_methods') or {},'processed_pages':job.get('processed_pages') or 0,'total_pages':job.get('total_pages') or 0,
                              'progress':job.get('progress') or 0,'message':str(job.get('message') or '')[:300],'error':str(job.get('error') or '')[:300],
                              'created_at':job.get('created_at') or 0,'updated_at':job.get('updated_at') or 0})
         return sorted(rows,key=lambda row:-float(row['created_at'] or 0))
@@ -1176,6 +1187,14 @@ class CourseManager(object):
             # Builds started before reading modes existed (or after a restart) read text first.
             reading=reading_mode((self.job_status(jid) or {}).get('reading'))
             total_pages=sum(int(u['end_page'])-int(u['start_page'])+1 for u in units);page_progress=[0]
+            # How each page was read and how fast, shown on the build card (and in the status report).
+            methods={'text':0,'OCR':0,'image model':0,'saved':0,'blank':0};timing={'started':time.time(),'read':0}
+            def reading_summary(current=None):
+                left=total_pages-page_progress[0]
+                rate=(time.time()-timing['started'])/timing['read'] if timing['read'] else None
+                eta=' · about %s left'%_duration(rate*left) if rate and left else ''
+                counts=' · '.join('%s %s'%(name,count) for name,count in methods.items() if count)
+                return '%s%s / %s pages%s%s'%(current+' · ' if current else '',page_progress[0],total_pages,eta,(' · '+counts) if counts else '')
             try:
                 for ui,u in enumerate(units,1):
                     if u['source_file']!=last_file:
@@ -1186,11 +1205,14 @@ class CourseManager(object):
                     def page_done(row,cached):
                         self._alive(course_id)
                         if row['status'] in ('ocr_running','vision_running'):
-                            self._set_job(jid,status='running',message=('%s: PDF page %s (%s / %s selected pages complete)'%('Local visual reading' if row['status']=='vision_running' else 'Local OCR',row['page'],page_progress[0],total_pages)),current_page=row['page'],current_source=source.get('display_name') or u['source_file'])
+                            self._set_job(jid,status='running',message=reading_summary('%s page %s'%('Image model reading' if row['status']=='vision_running' else 'OCR',row['page'])),page_methods=dict(methods),current_page=row['page'],current_source=source.get('display_name') or u['source_file'])
                             return
                         page_progress[0]+=1
+                        kind='saved' if cached else 'image model' if row.get('extraction_method')=='local_vision' else 'OCR' if row.get('extraction_method')=='local_ocr' else 'blank' if not row.get('text') else 'text'
+                        methods[kind]+=1
+                        if not cached:timing['read']+=1  # the time per page counts pages actually read
                         if page_progress[0]%5==0 or row['status']=='needs_review' or page_progress[0]==total_pages:
-                            self._set_job(jid,status='running',progress=4+int(10*page_progress[0]/max(1,total_pages)),message='Reading PDF page %s (%s / %s selected pages)'%(row['page'],page_progress[0],total_pages),processed_pages=page_progress[0],total_pages=total_pages,current_page=row['page'],current_source=source.get('display_name') or u['source_file'])
+                            self._set_job(jid,status='running',progress=4+int(10*page_progress[0]/max(1,total_pages)),message=reading_summary('Reading page %s'%row['page']),page_methods=dict(methods),processed_pages=page_progress[0],total_pages=total_pages,current_page=row['page'],current_source=source.get('display_name') or u['source_file'])
                     pages=list(iter_pages(doc,u['start_page'],u['end_page'],_shared_pages(sd,identity),identity,page_done,mode=reading))
                     figure_pages.extend({'unit_id':u['id'],'source_file':u['source_file'],'page':row['page']} for row in pages if row.get('figure_pending'))
                     source_quality[u['id']]=unit_quality(pages)

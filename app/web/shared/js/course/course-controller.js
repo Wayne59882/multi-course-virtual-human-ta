@@ -37,7 +37,7 @@ function injectBuilder(){
   const wrap=document.createElement('section');wrap.id='v241CourseBuilder';wrap.className='v241-course-builder';
   wrap.innerHTML=`<div class="v241-head"><div><h2>Build a Course</h2><div class="v241-sub">Upload course PDFs to detect chapters, prepare lecture scripts, build course Q&amp;A, and prepare practice questions.</div></div><span class="v241-course-badge" id="v241ActiveBadge">Built-in Physiology</span></div>
   <div class="v241-grid">
-    <div class="v241-field"><label for="v241CourseName">Course Name (optional)</label><input id="v241CourseName" type="text" placeholder="Leave blank to detect from the PDF content"></div>
+    <div class="v241-field"><label for="v241CourseName">Course Name (optional)</label><input id="v241CourseName" type="text" name="vq-course-title" autocomplete="off" data-lpignore="true" data-1p-ignore placeholder="Leave blank to detect from the PDF content"></div>
     <div class="v241-field v241-pdf-field"><label for="v241PdfFiles">Course Materials (PDF)</label><input id="v241PdfFiles" type="file" accept="application/pdf,.pdf" multiple></div>
   </div>
   <div class="v241-actions"><button type="button" class="v241-primary" id="v241InspectBtn">Upload &amp; Inspect Course Materials</button><button type="button" id="v241BuildBtn" disabled>Build Teaching Assistant</button><button type="button" id="v241RetryPrep" hidden>Retry Background Preparation</button><button type="button" id="v241CancelBuild" hidden>Cancel Build</button></div>
@@ -194,11 +194,17 @@ async function loadBuilds(){
   let list=[];try{const r=await fetch('/api/reference/course-builds',{cache:'no-store'});if(r.status===403){box.hidden=true;return 'stop';}const d=await r.json();if(!r.ok||!d.ok)return;list=d.builds||[];}catch(_){return;}
   const before=new Set(builds.filter(b=>b.status!=='error').map(b=>b.id));builds=list;
   const shown=list.filter(b=>b.id!==buildJobId);
-  box.innerHTML=shown.map(b=>{const failed=b.status==='error',waiting=b.status==='queued';
-    const label=failed?'Build stopped':waiting?'Waiting to build':'Building '+Math.round(Number(b.progress||0))+'%';
-    const detail=failed?(b.error||b.message||'Unknown error'):(b.message||'Working…');
-    return `<div class="v241-prep v241-build"><div class="v241-prep-head"><b>${esc(b.course_name)}${b.owner_name&&!b.owned?' · '+esc(b.owner_name):''}</b><span class="v241-prep-${failed?'error':waiting?'waiting':'working'}">${esc(label)}</span></div><div class="v241-prep-row v241-prep-${failed?'error':waiting?'waiting':'working'}"><span class="v241-prep-icon">${failed?'!':waiting?'…':'●'}</span><span class="v241-prep-label">${esc(detail)}</span><span class="v241-prep-detail"></span><progress max="100" value="${Math.round(Number(b.progress||0))}"></progress></div></div>`;}).join('');
+  box.innerHTML=shown.map(b=>{const failed=b.status==='error',waiting=b.status==='queued',state=failed?'error':waiting?'waiting':'working';
+    const label=failed?'Build stopped':waiting?'Waiting for the build before it':'Building '+Math.round(Number(b.progress||0))+'%';
+    const detail=failed?(b.error||b.message||'Unknown error'):waiting?'Builds run one at a time; this starts when the build above finishes.':(b.message||'Working…');
+    const title=(b.course_name||'').trim()||(b.files||[]).join(', ')||'Uploaded course';
+    const files=(b.course_name&&(b.files||[]).length)?' · '+(b.files||[]).join(', '):'';
+    return `<div class="v241-prep v241-build"><div class="v241-prep-head"><b>${esc(title)}${b.owner_name&&!b.owned?' · '+esc(b.owner_name):''}<small>${esc(files)}</small></b><span class="v241-prep-${state}">${esc(label)}</span></div><div class="v241-prep-row v241-prep-${state}"><span class="v241-prep-icon">${failed?'!':waiting?'…':'●'}</span><span class="v241-prep-label">${esc(detail)}</span><span class="v241-prep-detail">${failed?'':`<button type="button" class="v241-build-cancel" data-job="${esc(b.id)}">Cancel</button>`}</span><progress max="100" value="${Math.round(Number(b.progress||0))}"></progress></div></div>`;}).join('');
   box.hidden=!shown.length;
+  box.querySelectorAll('.v241-build-cancel').forEach(btn=>btn.addEventListener('click',async()=>{
+    if(!window.confirm('Cancel this course build? The uploaded PDF stays saved, and pages already read are kept for the next upload of the same PDF.'))return;
+    btn.disabled=true;try{const r=await fetch('/api/reference/course-build-cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:btn.dataset.job}),cache:'no-store'}),d=await r.json().catch(()=>({}));if(!r.ok||d.ok===false)throw new Error(d.error||('HTTP '+r.status));await loadBuilds();}
+    catch(e){btn.disabled=false;setBuildStatus('Could not cancel the build: '+String(e&&e.message||e),'error');}}));
   if([...before].some(id=>!list.some(b=>b.id===id&&b.status!=='error'))){await loadCourseList();if(!activeId())setBuildStatus('A course finished building. Select it in Currently teaching.','ok');}
 }
 async function loadManifest(cid){

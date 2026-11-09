@@ -47,6 +47,8 @@ with tempfile.TemporaryDirectory() as temporary:
     rows=[json.loads(line) for line in (manager._course_dir(cid)/'chunks.jsonl').read_text().splitlines()]
     assert 1001 in {row['pdf_page'] for row in rows} and 501 not in {row['pdf_page'] for row in rows}
     assert manager.job_status(jid)['processed_pages']==1001
+    # The build card says how pages were read (text layer, OCR, image model, saved earlier).
+    methods=manager.job_status(jid)['page_methods'];assert sum(methods.values())==1001 and methods['text']>=999,methods
     assert manager.upload_diagnostics(stage['stage_id'])['source_quality']
     # Simulate restart in a different CourseManager: healthy cached pages are
     # reused, while the problem page is reconsidered on a retry.
