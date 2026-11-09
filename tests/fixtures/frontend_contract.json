@@ -215,8 +215,8 @@
       },
       {
         "old": "js/57_role_access.js",
-        "query": "v=R18h-20261109",
-        "sha256": "987b4f64fe27ee502a699ab587f6bc8d20398ebd67fe9593389cea6fc5ddc7b8",
+        "query": "v=R18j-20261109",
+        "sha256": "1619b0cd128102d4437e2b03454eb13accc08f667757aafcb48ef06db0fe67dc",
         "new": "shared/js/auth/role-access.js"
       },
       {
@@ -505,8 +505,8 @@
       },
       {
         "old": "js/57_role_access.js",
-        "query": "v=R18h-20261109",
-        "sha256": "987b4f64fe27ee502a699ab587f6bc8d20398ebd67fe9593389cea6fc5ddc7b8",
+        "query": "v=R18j-20261109",
+        "sha256": "1619b0cd128102d4437e2b03454eb13accc08f667757aafcb48ef06db0fe67dc",
         "new": "shared/js/auth/role-access.js"
       },
       {

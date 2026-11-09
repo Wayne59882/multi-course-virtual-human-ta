@@ -129,9 +129,12 @@ function tab(which){
   $('loginForm').hidden=!login;$('registerForm').hidden=login;$('registerDone').hidden=true;
   (login?$('loginEmail'):$('regName')).focus();
 }
+// Opened on the site's old address: continue on the new one.
+function moved(d){if(d&&d.code==='site_moved'&&/^https:\/\//.test(d.url||'')){const next=new URLSearchParams(location.search).get('next');location.replace(d.url+(next?'?next='+encodeURIComponent(next):''));return true;}return false;}
 async function post(path,body){
   const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),cache:'no-store',credentials:'same-origin'});
   let d={};try{d=await r.json();}catch(_){d={error:'伺服器沒有回應，請稍後再試。'};}
+  moved(d);
   return {status:r.status,data:d};
 }
 function forgetOtherUsersCourse(userId){
@@ -183,7 +186,8 @@ $('registerForm').addEventListener('submit',async e=>{
   btn.disabled=false;
 });
 
-fetch('/api/auth/me',{cache:'no-store',credentials:'same-origin'}).then(r=>{
+fetch('/api/auth/me',{cache:'no-store',credentials:'same-origin'}).then(async r=>{
+  if(r.status===409&&moved(await r.json().catch(()=>null)))return;
   if(r.ok)location.replace(nextUrl());
   else if(r.status>=500)show($('loginMsg'),'伺服器目前沒有回應，請稍後再試。','info');
 }).catch(()=>{});

@@ -18,6 +18,7 @@ window.fetch=async function(input,init){
   try{
     const url=typeof input==='string'?input:(input&&input.url)||'';
     if(r.status===401&&/\/api\//.test(url)&&!/\/api\/auth\//.test(url))r.clone().json().then(d=>{if(d&&d.code==='login_required')toLogin();}).catch(()=>{});
+    if(r.status===409&&/\/api\//.test(url))r.clone().json().then(d=>{if(d&&d.code==='site_moved'&&/^https:\/\//.test(d.url||''))location.replace(new URL(location.pathname+location.search,d.url).toString());}).catch(()=>{});
   }catch(_){}
   return r;
 };
@@ -199,6 +200,7 @@ async function init(){
   let r;
   try{r=await nativeFetch('/api/auth/me',{cache:'no-store'});}catch(_){return;}
   if(r.status===401){toLogin();return;}
+  if(r.status===409){const d=await r.json().catch(()=>null);if(d&&d.code==='site_moved'&&/^https:\/\//.test(d.url||'')){location.replace(new URL(location.pathname+location.search,d.url).toString());return;}}
   if(!r.ok)return;
   const d=await r.json().catch(()=>null);if(!d||!d.user)return;
   user=d.user;window.VQ_AUTH_USER=user;

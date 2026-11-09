@@ -548,7 +548,12 @@ async function appPage(request,env,u){
 function siteRedirect(u,env){
   let site=null;try{site=env.SITE_URL?new URL(String(env.SITE_URL)):null;}catch(_){site=null;}
   if(!site||site.protocol!=='https:'||u.host===site.host||!u.hostname.endsWith('.workers.dev'))return null;
-  return Response.redirect(new URL(u.pathname+u.search,site).toString(),302);
+  const target=new URL(u.pathname+u.search,site).toString();
+  // A page left open on the old address calls the API with fetch, which cannot follow a
+  // redirect to another site (it fails as "cannot connect"); answer with the new address instead.
+  if(u.pathname.startsWith('/api/'))return new Response(JSON.stringify({ok:false,code:'site_moved',url:new URL('/login/',site).toString(),
+    error:'網站已搬到新網址，請改用 '+site.origin+'/login/'}),{status:409,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'}});
+  return Response.redirect(target,302);
 }
 export default {
   async fetch(request,env){
