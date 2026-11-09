@@ -196,7 +196,10 @@ def _pages(doc,first,last,directory,progress,ocr,vision,mode,prefetch):
             try:
                 row=json.loads(path.read_text(encoding='utf-8'))
                 cached=row.get('page')==number and row.get('status') in ('readable','blank','partial')
-                if row.get('status')=='partial':cached=cached and row.get('ocr_config')==ocr.fingerprint and row.get('vision_config')==vision.fingerprint
+                if row.get('status')=='partial':
+                    # A reviewed vision reading stays valid whatever OCR is installed now.
+                    seen=row.get('extraction_method')=='local_vision' and row.get('image_content_read')
+                    cached=cached and (seen or row.get('ocr_config')==ocr.fingerprint) and row.get('vision_config')==vision.fingerprint
                 # A page read text-first is not a complete reading for a full (inline) build.
                 if mode=='inline' and row.get('figure_pending'):cached=False
             except Exception:pass

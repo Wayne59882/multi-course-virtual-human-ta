@@ -68,7 +68,7 @@ class SharedModelLock:
         # Background work takes turns by rank (see course_runtime: a course being viewed, then
         # the newest course; builds, then text, then image reading), not all courses at once.
         with Waiting() as turn:
-            blocked=lambda:priority_waiting() or not turn.first()
+            blocked=lambda:priority_waiting() or turn.paused() or not turn.first()
             while True:
                 while blocked():
                     background_check();time.sleep(0.2)

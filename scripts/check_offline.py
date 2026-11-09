@@ -89,6 +89,7 @@ def main():
         ("Student priority, delete and cancel", [sys.executable, str(TESTS / "test_course_priority_delete.py")]),
         ("Courses take turns on the model", [sys.executable, str(TESTS / "test_image_priority.py")]),
         ("Parallel OCR of scanned pages", [sys.executable, str(TESTS / "test_parallel_ocr.py")]),
+        ("Same PDF not read again; unopened courses pause", [sys.executable, str(TESTS / "test_reuse_readings.py")]),
         ("Background PDF inspection and builds in progress", [sys.executable, str(TESTS / "test_upload_background.py")]),
         ("Answer job HTTP responses", [sys.executable, str(TESTS / "test_answer_jobs_http.py")]),
         ("Manual stop", [node, str(TESTS / "test_manual_stop.cjs"),

@@ -52,9 +52,12 @@ for thread in threads:
     thread.join(5)
 assert order == ['running call', 'build', 'newest questions', 'old lecture', 'open course images', 'old images'], order
 
-# The course manager ranks its own work this way.
+# The course manager ranks its own work this way (in a throw-away course folder).
+cr.COURSE_ROOT = Path(tempfile.mkdtemp(prefix='vq-rank-courses-'))
+cr.STAGING_ROOT = cr.COURSE_ROOT / '_staging'
+cr.STAGING_ROOT.mkdir()
 manager = cr.CourseManager()
-manager.created.update({'old': 100.0, 'new': 300.0})
+manager.created.update({'old': time.time() - 7200, 'new': time.time() - 600})  # both uploaded recently
 assert manager._rank('new', 'text') < manager._rank('old', 'text') < manager._rank('new', 'image')
 assert manager._rank('old', 'build') < manager._rank('new', 'text')
 manager.viewed('old')

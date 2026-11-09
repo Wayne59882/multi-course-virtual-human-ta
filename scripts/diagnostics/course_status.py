@@ -66,11 +66,15 @@ for job in jobs[-8:]:
           job.get('reading', '(old)'), ago(job.get('updated_at')), str(job.get('message') or job.get('error') or '')[:150]))
 
 print('\n--- courses ---')
+views = read(COURSES / '_views.json') or {}
 for manifest_path in sorted(COURSES.glob('*/course_manifest.json'), key=lambda p: p.stat().st_mtime):
     m = read(manifest_path) or {}
     units = m.get('units') or []
     pages = sum(int(u.get('end_page') or 0) - int(u.get('start_page') or 0) + 1 for u in units)
-    print('\n# %s  [%s]  status=%s  manifest updated %s' % (m.get('course_name'), str(m.get('course_id'))[:8], m.get('status'), ago(manifest_path.stat().st_mtime)))
+    opened = max(float(views.get(m.get('course_id')) or 0), float(m.get('created_at') or 0))
+    paused = NOW - opened > 3 * 86400
+    print('\n# %s  [%s]  status=%s  manifest updated %s  last opened %s%s' % (m.get('course_name'), str(m.get('course_id'))[:8], m.get('status'),
+          ago(manifest_path.stat().st_mtime), ago(views.get(m.get('course_id'))), '  BACKGROUND PAUSED (opening the course resumes it)' if paused else ''))
     print('  units=%d pages=%d figure_pages=%d source_review_required=%s' % (
         len(units), pages, len(m.get('figure_pages') or []), bool((m.get('source_review') or {}).get('required'))))
     for kind, info in sorted((m.get('preparation') or {}).items()):

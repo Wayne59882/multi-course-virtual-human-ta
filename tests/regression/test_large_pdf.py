@@ -52,7 +52,7 @@ with tempfile.TemporaryDirectory() as temporary:
     # reused, while the problem page is reconsidered on a retry.
     counts={'read':0,'cached':0}
     with fitz.open(str(original)) as doc:
-        for row in ingestion.iter_pages(doc,1,1001,manager._stage_dir(stage['stage_id'])/'page_cache',received['sha256'],lambda row,cached:counts.__setitem__('cached' if cached else 'read',counts['cached' if cached else 'read']+1) if row['status'] not in ('ocr_running','vision_running') else None):pass
+        for row in ingestion.iter_pages(doc,1,1001,cr._shared_pages(manager._stage_dir(stage['stage_id']),received['sha256']),received['sha256'],lambda row,cached:counts.__setitem__('cached' if cached else 'read',counts['cached' if cached else 'read']+1) if row['status'] not in ('ocr_running','vision_running') else None):pass
     assert counts=={'read':1,'cached':1000},counts
     # Invalid files are retained with a diagnostic receipt rather than deleted.
     try:manager.inspect([('broken.pdf',b'%PDF-not-a-valid-document')],stage_id='broken-stage')

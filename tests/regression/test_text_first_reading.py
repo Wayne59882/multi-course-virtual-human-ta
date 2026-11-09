@@ -130,6 +130,18 @@ with tempfile.TemporaryDirectory() as temporary:
     assert len({c['pdf_page'] for c in figures}) == 12, figures
     assert seen[:2] == [5, 10] and seen[-1] == 12, 'passages are added every few pages, not only at the end: %s' % seen
     assert manager.manifest(cid)['preparation']['figures']['status'] == 'ready'
+    # Image readings are kept by PDF content: the same deck uploaded again is not read again.
+    assert len(list((cr.COURSE_ROOT / '_figure_cache').rglob('*.json'))) == 12
+    calls = sum(len(r.calls) for r in readers)
+    stage = manager.inspect([('deck.pdf', pdf)], course_name='Genomics again')
+    again = manager.start_build(stage['stage_id'], 'Genomics again', 'none', stage['units'], 'gemma', lambda *a: '')
+    for _ in range(200):
+        if manager.job_status(again['id']).get('status') in ('done', 'error'): break
+        time.sleep(0.05)
+    assert manager.job_status(again['id'])['status'] == 'done'
+    manager._prepare_figures(again['course_id'], 'gemma', lambda *a: '')
+    assert sum(len(r.calls) for r in readers) == calls, 'the same slides were read by the vision model again'
+    assert len({c['pdf_page'] for c in [json.loads(x) for x in (manager._course_dir(again['course_id']) / 'chunks.jsonl').read_text(encoding='utf-8').splitlines() if x] if c['extraction_method'] == 'local_vision_figure'}) == 12
     # 7. Image-only slides opened with OCR: once the vision model has read a page,
     #    its reviewed reading replaces the interim OCR text (also in the semantic index).
     scans = fitz.open()

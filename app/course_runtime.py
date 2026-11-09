@@ -8,10 +8,31 @@ from pathlib import Path
 from exam_questions import build as build_exam_questions,reviewed_card
 from math_integrity import math_issues, question_math_ok
 from content_integrity import text_issues, clean_course_text, question_text_ok, extract_page, ContentIntegrityError, SOURCE_RULE
-from pdf_ingestion import iter_pages, unit_quality, write_receipt, atomic_json, upload_diagnostics, reading_mode
+from pdf_ingestion import iter_pages, unit_quality, write_receipt, atomic_json, upload_diagnostics, reading_mode, REVISION as INGESTION_REVISION
 from course_grounding import review_text,REVISION as REVIEW_REVISION
-from ollama_cancel import BackgroundWork
+from ollama_cancel import BackgroundWork, PAUSED
 from pdf_vision import LocalVision
+
+
+def _shared_pages(stage_directory,identity):
+    """Page readings are kept by PDF content, so uploading the same PDF again (any teacher, any
+    stage) reuses every page already read. Readings an earlier upload left in its own stage
+    folder are adopted the first time."""
+    root=COURSE_ROOT/'_page_cache'
+    name=hashlib.sha256((INGESTION_REVISION+'|'+identity).encode()).hexdigest()[:24]
+    target=root/name
+    if not target.exists():
+        found=[path for path in [Path(stage_directory)/'page_cache'/name]+list(STAGING_ROOT.glob('*/page_cache/'+name)) if path.is_dir()]
+        if found:
+            best=max(found,key=lambda path:sum(1 for _ in path.glob('*.json')))
+            root.mkdir(parents=True,exist_ok=True)
+            temporary=root/(name+'.adopt-'+uuid.uuid4().hex[:8])
+            try:
+                shutil.copytree(str(best),str(temporary))
+                if not target.exists():os.rename(str(temporary),str(target))
+            except OSError:pass
+            finally:shutil.rmtree(str(temporary),ignore_errors=True)
+    return root
 
 
 class CourseDeleted(Exception):
@@ -57,6 +78,7 @@ QUESTION_TARGET=100
 FIGURE_BATCH=10  # figure pages read before their passages are added to course Q&A
 CHUNK_LIMIT=16*1024*1024  # one upload request; the page sends 8 MB
 VIEW_SECONDS=600  # a course whose page polled its status this recently counts as open (background priority)
+DORMANT_SECONDS=3*86400  # background work pauses on a course nobody has opened for this long; opening it resumes
 QUESTION_GENERATION='exam-mcq-v5'
 RERANK_BLEND=float(os.environ.get('VQ_COURSE_RERANK_BLEND','0.92'))
 MIN_SCOPE_SCORE=float(os.environ.get('VQ_COURSE_MIN_SCOPE_SCORE','0.26'))
@@ -745,7 +767,7 @@ def _lex_score(terms,value):
 class CourseManager(object):
     def __init__(self):
         self.build_slots=threading.Semaphore(1);self.jobs={};self.jobs_lock=threading.RLock();self.cache={};self.cache_lock=threading.Lock()
-        self.upload_lock=threading.RLock();self.manifest_lock=threading.RLock();self.scenario_lock=threading.RLock();self.quiz_result_lock=threading.RLock();self.running=set();self.deleted=set();self.running_lock=threading.Lock();self.views={};self.created={};self.inspecting=set();self.inspect_lock=threading.Lock()
+        self.upload_lock=threading.RLock();self.manifest_lock=threading.RLock();self.scenario_lock=threading.RLock();self.quiz_result_lock=threading.RLock();self.running=set();self.deleted=set();self.running_lock=threading.Lock();self.views=self._load_views();self.views_saved=0;self.created={};self.inspecting=set();self.inspect_lock=threading.Lock()
 
     def _stage_dir(self,stage_id):return STAGING_ROOT/_safe_id(stage_id)
     def _course_dir(self,course_id):return COURSE_ROOT/_safe_id(course_id)
@@ -1095,15 +1117,29 @@ class CourseManager(object):
 
     def viewed(self,cid):
         """A teacher or student has this course open (its status is being read)."""
-        if cid:self.views[cid]=time.time()
+        if not cid:return
+        now=time.time();self.views[cid]=now
+        if now-self.views_saved>60:  # remembered across restarts, written at most once a minute
+            self.views_saved=now
+            try:_json_dump(COURSE_ROOT/'_views.json',self.views)
+            except Exception:pass
 
-    def _rank(self,cid,kind):
-        tier={'build':0,'text':1,'image':2}.get(kind,1)
-        open_now=time.time()-self.views.get(cid,0)<VIEW_SECONDS
+    def _load_views(self):
+        try:return {str(k):float(v) for k,v in json.loads((COURSE_ROOT/'_views.json').read_text(encoding='utf-8')).items()}
+        except Exception:return {}
+
+    def dormant(self,cid):
+        """Nobody has opened this course for DORMANT_SECONDS and it is not new: its background work waits."""
         created=self.created.get(cid)
         if created is None:
             created=float((self.manifest(cid) or {}).get('created_at') or time.time());self.created[cid]=created
-        return (tier,0 if open_now else 1,-created)
+        return time.time()-max(self.views.get(cid,0),created)>DORMANT_SECONDS
+
+    def _rank(self,cid,kind):
+        tier={'build':0,'text':1,'image':2}.get(kind,1)
+        if kind!='build' and self.dormant(cid):return PAUSED
+        open_now=time.time()-self.views.get(cid,0)<VIEW_SECONDS
+        return (tier,0 if open_now else 1,-self.created.get(cid,time.time()))
 
     def _discard_deleted(self,cid):
         """Remove files a stopped worker may have written after deletion."""
@@ -1155,7 +1191,7 @@ class CourseManager(object):
                         page_progress[0]+=1
                         if page_progress[0]%5==0 or row['status']=='needs_review' or page_progress[0]==total_pages:
                             self._set_job(jid,status='running',progress=4+int(10*page_progress[0]/max(1,total_pages)),message='Reading PDF page %s (%s / %s selected pages)'%(row['page'],page_progress[0],total_pages),processed_pages=page_progress[0],total_pages=total_pages,current_page=row['page'],current_source=source.get('display_name') or u['source_file'])
-                    pages=list(iter_pages(doc,u['start_page'],u['end_page'],sd/'page_cache',identity,page_done,mode=reading))
+                    pages=list(iter_pages(doc,u['start_page'],u['end_page'],_shared_pages(sd,identity),identity,page_done,mode=reading))
                     figure_pages.extend({'unit_id':u['id'],'source_file':u['source_file'],'page':row['page']} for row in pages if row.get('figure_pending'))
                     source_quality[u['id']]=unit_quality(pages)
                     atomic_json(cd/'source_quality.json',source_quality)
@@ -1316,7 +1352,7 @@ class CourseManager(object):
                 self._update_manifest(cid,lambda current:current['preparation']['sources'].update({'current_page':row['page'],'completed':len(seen),'total':total,'updated_at':time.time(),
                     'message':'%s: page %s (%s / %s pages)'%(label,row['page'],len(seen),total)}))
             with closing(fitz.open(str(cd/'source'/spec['source_file']))) as doc:
-                pages=list(iter_pages(doc,spec['start_page'],spec['end_page'],sd/'page_cache',source.get('sha256') or spec['source_file'],progress))
+                pages=list(iter_pages(doc,spec['start_page'],spec['end_page'],_shared_pages(sd,source.get('sha256') or spec['source_file']),source.get('sha256') or spec['source_file'],progress))
             quality=unit_quality(pages);text=_safe_source_text('\n\n'.join(row['text'] for row in pages if row['text']))
             pending.extend({'unit_id':uid,'source_file':spec['source_file'],'page':row['page']} for row in pages if row.get('figure_pending'))
             if sum(c.isalpha() for c in text)<40:text='';quality['status']='needs_review'
@@ -1486,16 +1522,25 @@ class CourseManager(object):
                     if final:self._drop_indexed_chunks(cid)  # an index built meanwhile may still hold replaced OCR passages
                 else:
                     with self.cache_lock:self.cache.pop(cid,None)  # text search sees new passages at once
+            shas={src.get('file_name'):src.get('sha256') for src in m.get('sources') or [] if src.get('sha256')}
+            def shared(row):
+                sha=shas.get(row['source_file'])
+                return COURSE_ROOT/'_figure_cache'/sha/('%06d-%s.json'%(int(row['page']),vision.fingerprint)) if sha else None
             try:
                 for n,row in enumerate(pages,1):
                     self._alive(cid)
                     key='%s|%s'%(row['source_file'],row['page'])
+                    if key not in done and shared(row) is not None and shared(row).exists():
+                        try:done[key]=json.loads(shared(row).read_text(encoding='utf-8'));_json_dump(cache_path,done)  # read before (same PDF, same model)
+                        except Exception:pass
                     if key not in done:
                         status(status='preparing',completed=n-1,total=len(pages),message='Reading figures: page %s (%s / %s)'%(row['page'],n,len(pages)))
                         if row['source_file'] not in docs:docs[row['source_file']]=fitz.open(str(cd/'source'/row['source_file']))
                         result=vision.read(docs[row['source_file']][int(row['page'])-1])
                         done[key]={'ok':bool(result.get('ok')),'text':result.get('text','') if result.get('ok') else '','error':result.get('error','')[:240]}
                         self._alive(cid);_json_dump(cache_path,done)
+                        if done[key]['ok'] and shared(row) is not None:
+                            shared(row).parent.mkdir(parents=True,exist_ok=True);_json_dump(shared(row),done[key])
                         if n%FIGURE_BATCH==0:publish(False)
             finally:
                 for doc in docs.values():doc.close()

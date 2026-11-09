@@ -54,6 +54,7 @@ def background_check():
 
 _WAITERS = {}
 _WAITERS_LOCK = threading.Lock()
+PAUSED = (1000,)  # a rank at or above this waits until it changes (a course nobody has opened lately)
 
 
 def background_rank():
@@ -79,6 +80,12 @@ class Waiting(object):
             _WAITERS.pop(self.key, None)
         return False
 
+    def paused(self):
+        try:
+            return self.rank is not None and tuple(self.rank()) >= PAUSED
+        except Exception:
+            return False
+
     def first(self):
         """True unless another waiting call in this process is ranked strictly better."""
         with _WAITERS_LOCK:
@@ -90,7 +97,7 @@ class Waiting(object):
             except Exception:
                 return (99,)
         mine = value(self.rank)
-        return all(not value(rank) < mine for key, rank in waiting if key is not self.key)
+        return all(not value(rank) < mine or value(rank) >= PAUSED for key, rank in waiting if key is not self.key)
 
 
 class BackgroundWork(object):
