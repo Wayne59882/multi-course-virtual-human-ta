@@ -1,5 +1,9 @@
 # Change Log
 
+## R18g — 2026-11-09
+
+- 不需要管理員權限也能安裝 OCR：scripts/setup/install_ocr_user.sh 把 Tesseract（英文＋繁體中文）裝在自己的資料夾（預設 /work103/wayne6/ocr），並寫入 <網站資料夾>/logs/tesseract.json；網站會自動找到它，不用重新啟動。先用 conda-forge（micromamba），失敗時改用 GitHub 上的 Tesseract AppImage。
+
 ## R18f — 2026-11-09
 
 - 先文字後圖片：投影片只要有自己的文字（例如只有標題，10 個英數字以上）就直接開放，圖片改在背景讀；原本要 40 個字以上，標題短的投影片會在建課時就交給影像模型逐頁讀圖。完全沒有文字、OCR 也讀不到的頁面仍在建課時讀圖。

@@ -104,6 +104,7 @@ def main():
         ("Large PDF and private upload diagnostics", [sys.executable,str(TESTS / "test_large_pdf.py")]),
         ("Teaching-unit names and page ranges", [sys.executable,str(TESTS / "test_unit_detection.py")]),
         ("Text-first course reading", [sys.executable,str(TESTS / "test_text_first_reading.py")]),
+        ("OCR installed without administrator rights", [sys.executable,str(TESTS / "test_user_ocr.py")]),
         ("Local OCR and original PDF streaming", [sys.executable,str(TESTS / "test_pdf_ocr.py")]),
         ("Automatic sync preservation and rollback", [sys.executable,str(TESTS / "test_auto_sync.py")]),
         ("Manual ZIP update and rollback", [sys.executable,str(TESTS / "test_manual_release.py")]),

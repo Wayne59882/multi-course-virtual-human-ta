@@ -12,9 +12,28 @@ from pathlib import Path
 from content_integrity import text_issues
 
 
+# Tesseract installed without administrator rights (scripts/setup/install_ocr_user.sh)
+# is recorded here: {"executable": ".../bin/tesseract", "tessdata": ".../share/tessdata"}.
+USER_OCR=Path(__file__).resolve().parent/'logs'/'tesseract.json'
+
+
+def _tesseract():
+    """(executable, tessdata directory or '') from VQ_TESSERACT, the PATH, or a user install."""
+    configured=os.environ.get('VQ_TESSERACT','').strip()
+    if configured:return configured,os.environ.get('TESSDATA_PREFIX','')
+    found=shutil.which('tesseract')
+    if found:return found,''
+    try:
+        record=json.loads(USER_OCR.read_text(encoding='utf-8'))
+        executable=str(record.get('executable') or '')
+        if executable and os.access(executable,os.X_OK):return executable,str(record.get('tessdata') or '')
+    except (OSError,ValueError,AttributeError):pass
+    return None,''
+
+
 class LocalOCR:
     def __init__(self,languages=None):
-        self.executable=shutil.which('tesseract')
+        self.executable,self.tessdata=_tesseract()
         self.requested=languages or os.environ.get('VQ_PDF_OCR_LANGS','eng+chi_tra')
         self.languages=[];self.error=''
         if os.environ.get('VQ_PDF_OCR','auto').lower() in ('off','0','false'):
@@ -23,13 +42,18 @@ class LocalOCR:
         elif not re.fullmatch(r'[a-zA-Z0-9_+/-]+',self.requested):self.error='Invalid OCR language setting.'
         else:
             try:
-                result=subprocess.run([self.executable,'--list-langs'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
+                result=subprocess.run([self.executable,'--list-langs'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=self._env(),timeout=10)
                 available=result.stdout.decode('utf-8',errors='replace').splitlines()[1:]
                 self.languages=[x.strip() for x in available if x.strip()]
                 missing=[x for x in self.requested.split('+') if x not in self.languages]
                 if result.returncode or missing:self.error='Missing OCR language data: '+', '.join(missing or [self.requested])
             except (OSError,subprocess.TimeoutExpired) as error:self.error='Cannot start local OCR: '+str(error)[:200]
         self.fingerprint=hashlib.sha256(json.dumps([self.requested,self.languages,self.error,'ocr1']).encode()).hexdigest()[:16]
+
+    def _env(self):
+        env=dict(os.environ)
+        if self.tessdata:env['TESSDATA_PREFIX']=self.tessdata
+        return env
 
     def report(self):
         return {'engine':'tesseract','available':not bool(self.error),'languages':self.requested,
@@ -48,7 +72,7 @@ class LocalOCR:
             pixmap=getter(matrix=fitz.Matrix(scale,scale),alpha=False,colorspace=fitz.csRGB)
             with tempfile.TemporaryDirectory(prefix='course-ocr-') as temporary:
                 image=Path(temporary)/'page.png';pixmap.save(str(image));del pixmap
-                env=dict(os.environ);env['OMP_THREAD_LIMIT']='1'
+                env=self._env();env['OMP_THREAD_LIMIT']='1'
                 result=subprocess.run([self.executable,str(image),'stdout','-l',self.requested,'--psm','3','tsv'],
                     stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,timeout=45)
                 if result.returncode:raise RuntimeError(result.stderr.decode('utf-8',errors='replace')[:300])
