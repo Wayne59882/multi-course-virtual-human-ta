@@ -1654,10 +1654,12 @@ class Handler(SharedAssetsMixin, SimpleHTTPRequestHandler):
             try:self.send_json(200,COURSES.quiz_statistics(cid))
             except ValueError as e:self.send_json(404,{'ok':False,'error':str(e)})
             return
+        if self.path.startswith('/api/reference/course-builds'):
+            self.send_json(200,{'ok':True,'builds':COURSES.active_builds()});return
         if self.path.startswith('/api/reference/course-upload-status'):
             from urllib.parse import urlparse,parse_qs
             qs=parse_qs(urlparse(self.path).query)
-            try:self.send_json(200,{'ok':True,**COURSES.upload_status((qs.get('stage_id') or [''])[0],(qs.get('upload_id') or [''])[0])})
+            try:self.send_json(200,{'ok':True,**COURSES.upload_status((qs.get('stage_id') or [''])[0],(qs.get('upload_id') or [''])[0],background=True)})
             except Exception as e:self.send_json(400,{'ok':False,'error':str(e)})
             return
         if self.path.startswith('/api/reference/course-stage-status'):
@@ -1693,9 +1695,9 @@ class Handler(SharedAssetsMixin, SimpleHTTPRequestHandler):
     def do_POST(self):
         if self.path=='/api/reference/course-upload-chunk':
             try:
-                fields,files=self.read_multipart(max_bytes=3*1024*1024)
+                fields,files=self.read_multipart(max_bytes=17*1024*1024)
                 if len(files)!=1:raise ValueError('Exactly one PDF chunk is required.')
-                result=COURSES.upload_chunk(fields.get('stage_id',''),fields.get('upload_id',''),fields.get('file_name',''),fields.get('total_size','0'),fields.get('offset','0'),files[0][1],fields.get('course_name',''))
+                result=COURSES.upload_chunk(fields.get('stage_id',''),fields.get('upload_id',''),fields.get('file_name',''),fields.get('total_size','0'),fields.get('offset','0'),files[0][1],fields.get('course_name',''),background=True)
                 self.send_json(200,{'ok':True,**result})
             except ValueError as e:self.send_json(400,{'ok':False,'error':str(e)})
             except Exception as e:self.send_json(500,{'ok':False,'error':'PDF chunk upload failed','detail':str(e)})

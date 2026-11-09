@@ -64,20 +64,25 @@ class LocalOCR:
                 'installed_languages':self.languages,'error':self.error,
                 'setup':'Install Tesseract with eng and chi_tra data; choose other installed languages using VQ_PDF_OCR_LANGS.'}
 
-    def read(self,page):
+    def render(self,page):
+        """The page as PNG bytes (main thread: PyMuPDF documents are not shared between threads)."""
+        import fitz
+        # At most eight million RGB pixels; one Tesseract thread per page.
+        # Never rasterize the whole book into memory.
+        rect=page.rect;area=max(1,float(rect.width)*float(rect.height))
+        scale=min(220.0/72,(8000000.0/area)**.5)
+        getter=getattr(page,'get_pixmap',None) or getattr(page,'getPixmap')
+        pixmap=getter(matrix=fitz.Matrix(scale,scale),alpha=False,colorspace=fitz.csRGB)
+        # PNG bytes through either PyMuPDF name: the server's older release has getPNGData, not save/tobytes.
+        encoder=getattr(pixmap,'tobytes',None) or getattr(pixmap,'getPNGData')
+        return encoder()
+
+    def recognize(self,png):
+        """Run Tesseract on rendered PNG bytes; safe to call from several threads at once."""
         if self.error:return {'ok':False,'error':self.error}
         try:
-            import fitz
-            # At most eight million RGB pixels; only one extraction worker and
-            # one Tesseract thread. Never rasterize the whole book into memory.
-            rect=page.rect;area=max(1,float(rect.width)*float(rect.height))
-            scale=min(220.0/72,(8000000.0/area)**.5)
-            getter=getattr(page,'get_pixmap',None) or getattr(page,'getPixmap')
-            pixmap=getter(matrix=fitz.Matrix(scale,scale),alpha=False,colorspace=fitz.csRGB)
             with tempfile.TemporaryDirectory(prefix='course-ocr-') as temporary:
-                # PNG bytes through either PyMuPDF name: the server's older release has getPNGData, not save/tobytes.
-                encoder=getattr(pixmap,'tobytes',None) or getattr(pixmap,'getPNGData')
-                image=Path(temporary)/'page.png';image.write_bytes(encoder());del pixmap
+                image=Path(temporary)/'page.png';image.write_bytes(png)
                 env=self._env();env['OMP_THREAD_LIMIT']='1'
                 # TSV is requested as a setting, not the 'tsv' config file, which a separately
                 # downloaded language folder does not include.
@@ -87,6 +92,12 @@ class LocalOCR:
             return parse_tsv(result.stdout.decode('utf-8',errors='replace'))
         except subprocess.TimeoutExpired:return {'ok':False,'error':'Local OCR exceeded the 45-second page limit; other pages continue.'}
         except Exception as error:return {'ok':False,'error':'Local OCR failed: '+str(error)[:400]}
+
+    def read(self,page):
+        if self.error:return {'ok':False,'error':self.error}
+        try:png=self.render(page)
+        except Exception as error:return {'ok':False,'error':'Local OCR failed: '+str(error)[:400]}
+        return self.recognize(png)
 
 
 def parse_tsv(value):

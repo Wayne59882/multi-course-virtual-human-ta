@@ -81,7 +81,7 @@ STATUS_LABEL = {'pending': '審核中 Pending', 'approved': '已核准 Approved'
                 'disabled': '已停用 Disabled'}
 
 # Course functions only teachers may call (upload, build, delete, regenerate).
-TEACHER_ONLY = {'course-upload-chunk', 'course-upload-status', 'course-inspect', 'course-stage-status',
+TEACHER_ONLY = {'course-upload-chunk', 'course-upload-status', 'course-inspect', 'course-stage-status', 'course-builds',
                 'course-build', 'course-job-status', 'course-build-cancel', 'course-delete', 'course-retry-preparation',
                 'course-expand-questions'}
 PUBLIC_API = {'/api/health', '/api/reference/health', '/api/kb/health'}
@@ -593,6 +593,22 @@ def after_response(user, ctx, status, data, ctype):
         for report in payload.get('uploads') or []:
             report['owner']=owners.get(report.get('stage_id'))
         return json.dumps(payload,ensure_ascii=False).encode('utf-8')
+    if seg == 'course-builds':
+        # Builds in progress: a teacher sees their own (from any browser); the administrator sees all.
+        admin = bool(user.get('is_admin'))
+        owners = {row['job_id']: row for row in _all('SELECT j.job_id, j.owner_id, u.name FROM jobs j LEFT JOIN users u ON u.id=j.owner_id')}
+        kept = []
+        for build in payload.get('builds') or []:
+            row = owners.get(str((build or {}).get('id') or ''))
+            if admin or (row and row['owner_id'] == user['id']):
+                build = dict(build)
+                build['owned'] = bool(row and row['owner_id'] == user['id'])
+                if admin:
+                    build['owner_id'] = row['owner_id'] if row else None
+                    build['owner_name'] = (row['name'] or '') if row else ''
+                kept.append(build)
+        payload['builds'] = kept
+        return json.dumps(payload, ensure_ascii=False).encode('utf-8')
     if seg == 'course-list':
         courses = payload.get('courses') if isinstance(payload.get('courses'), list) else []
         admin = bool(user.get('is_admin'))
@@ -853,6 +869,15 @@ def handle(handler, method, path, query):
 
         if not user:
             return _reply(handler, 401, {'ok': False, 'code': 'login_required', 'error': 'Please sign in.'})
+
+        if path == '/api/auth/act' and method == 'GET':
+            real = user_from_request(handler, act=False)
+            if not real or not real['is_admin']:
+                return _reply(handler, 403, {'ok': False, 'code': 'admin_only', 'error': '只有管理員可以使用。'})
+            rows = _all("SELECT id, name FROM users WHERE status='approved' AND role='teacher' AND id<>? ORDER BY name", (real['id'],))
+            return _reply(handler, 200, {'ok': True, 'admin': {'id': real['id'], 'name': real['name']},
+                                         'acting_id': user['id'] if user.get('acting_admin') else None,
+                                         'teachers': [{'id': r['id'], 'name': r['name']} for r in rows]})
 
         if path == '/api/auth/act' and method == 'POST':
             # Administrator: use the site as a teacher (user_id), or return to the administrator (null).

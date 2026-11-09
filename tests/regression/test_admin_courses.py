@@ -141,6 +141,22 @@ with tempfile.TemporaryDirectory() as temporary:
     # Students, accounts not yet approved and the administrator are not choices.
     for bad in (4, 5, 1):
         assert api(admin_token, '/api/auth/act', {'user_id': bad})[0] == 400, bad
+    # While viewing as a teacher, the administrator's switcher still lists everyone to switch to.
+    status, reply = api(admin_token, '/api/auth/act', method='GET')
+    assert status == 200 and reply['acting_id'] == 2 and reply['admin']['id'] == 1
+    assert [t['id'] for t in reply['teachers']] == [2, 3], reply
+    assert api(advisor_token, '/api/auth/act', method='GET')[0] == 403
+    # Builds in progress: the teacher (and the administrator viewing as them) sees their own;
+    # the administrator sees everyone's with the owner; others see none.
+    auth._exec('INSERT OR IGNORE INTO jobs(job_id,owner_id,course_id,created_at) VALUES(?,?,?,?)', ('other-build', 3, 'x', time.time()))
+    running = {'ok': True, 'builds': [{'id': 'acting-job', 'course_name': 'Genomic study', 'status': 'running'},
+                                      {'id': 'other-build', 'course_name': 'Other', 'status': 'queued'},
+                                      {'id': 'unknown-build', 'course_name': 'Legacy', 'status': 'running'}]}
+    assert [b['id'] for b in respond(acting, {'seg': 'course-builds'}, running)['builds']] == ['acting-job']
+    assert [b['id'] for b in respond(other, {'seg': 'course-builds'}, running)['builds']] == ['other-build']
+    seen = respond(admin, {'seg': 'course-builds'}, running)['builds']
+    assert [b['id'] for b in seen] == ['acting-job', 'other-build', 'unknown-build'] and seen[0]['owner_name'] == 'Advisor'
+    assert call(student, 'course-builds')[0]['status'] == 403
     status, reply = api(admin_token, '/api/auth/act', {'user_id': None})
     assert status == 200 and reply['user']['id'] == 1 and reply['user']['is_admin']
     assert auth.user_from_request(Request(admin_token))['is_admin']
@@ -149,7 +165,7 @@ with tempfile.TemporaryDirectory() as temporary:
     controller = (ROOT / 'app/web/shared/js/course/course-controller.js').read_text(encoding='utf-8')
     roles = (ROOT / 'app/web/shared/js/auth/role-access.js').read_text(encoding='utf-8')
     assert 'c.owner_name&&!c.owned' in controller
-    assert '/api/auth/admin/course-owner' in roles and "'/api/auth/act'" in roles and 'vqActBack' in roles
+    assert '/api/auth/admin/course-owner' in roles and "'/api/auth/act'" in roles and 'fillAccounts' in roles
     # Opening another teacher's course switches to that teacher's view with the course open,
     # and the course's preparation has its own card (not the upload meters).
     assert 'window.VQ_beforeCourseSwitch=cid=>' in roles and 'VQ_beforeCourseSwitch(cid))return;' in controller

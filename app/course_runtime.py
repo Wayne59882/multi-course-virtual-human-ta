@@ -55,6 +55,7 @@ SOURCE_MAX_FINAL=max(2,min(5,int(os.environ.get('VQ_COURSE_SOURCE_MAX_FINAL','3'
 CONTEXT_BUDGET=max(4500,int(os.environ.get('VQ_COURSE_CONTEXT_CHARS','8500')))
 QUESTION_TARGET=100
 FIGURE_BATCH=10  # figure pages read before their passages are added to course Q&A
+CHUNK_LIMIT=16*1024*1024  # one upload request; the page sends 8 MB
 VIEW_SECONDS=600  # a course whose page polled its status this recently counts as open (background priority)
 QUESTION_GENERATION='exam-mcq-v5'
 RERANK_BLEND=float(os.environ.get('VQ_COURSE_RERANK_BLEND','0.92'))
@@ -744,34 +745,84 @@ def _lex_score(terms,value):
 class CourseManager(object):
     def __init__(self):
         self.build_slots=threading.Semaphore(1);self.jobs={};self.jobs_lock=threading.RLock();self.cache={};self.cache_lock=threading.Lock()
-        self.upload_lock=threading.RLock();self.manifest_lock=threading.RLock();self.scenario_lock=threading.RLock();self.quiz_result_lock=threading.RLock();self.running=set();self.deleted=set();self.running_lock=threading.Lock();self.views={};self.created={}
+        self.upload_lock=threading.RLock();self.manifest_lock=threading.RLock();self.scenario_lock=threading.RLock();self.quiz_result_lock=threading.RLock();self.running=set();self.deleted=set();self.running_lock=threading.Lock();self.views={};self.created={};self.inspecting=set();self.inspect_lock=threading.Lock()
 
     def _stage_dir(self,stage_id):return STAGING_ROOT/_safe_id(stage_id)
     def _course_dir(self,course_id):return COURSE_ROOT/_safe_id(course_id)
     def _manifest_path(self,course_id):return self._course_dir(course_id)/'course_manifest.json'
 
-    def upload_status(self,stage_id,upload_id):
+    def upload_status(self,stage_id,upload_id,background=False):
+        """Upload progress.  background=True (the web server): a received PDF is inspected in a
+        background thread and reported as inspecting, so no request waits for a long PDF."""
         sd=self._stage_dir(stage_id);uid=_safe_id(upload_id)
         meta=sd/'_uploads'/(uid+'.json')
         if not meta.exists():return {'offset':0,'complete':False,'stage_id':_safe_id(stage_id)}
+        if background:
+            with self.upload_lock:state=json.loads(meta.read_text(encoding='utf-8'))
+            if not state.get('complete') and state['offset']==state['size']:
+                if state.get('inspect_error'):raise ValueError(state['inspect_error'])
+                self._inspect_later(stage_id,uid)
+                return {'offset':state['offset'],'complete':False,'inspecting':True,'stage_id':_safe_id(stage_id)}
         with self.upload_lock:
             state=json.loads(meta.read_text(encoding='utf-8'))
             part=sd/'_uploads'/(uid+'.part')
             if not state.get('complete') and state['offset']==state['size'] and part.exists():
-                stage_path=sd/'stage.json'
-                count=len(json.loads(stage_path.read_text(encoding='utf-8')).get('sources',[])) if stage_path.exists() else 0
-                if count<=state.get('source_count',0):
-                    self.inspect([(state['name'],part)],course_name=state.get('course_name',''),stage_id=stage_id)
-                state['complete']=True;_json_dump(meta,state);part.unlink()
+                self._finish_inspection(sd,stage_id,meta,state,part)
         result={'offset':state['offset'],'complete':bool(state.get('complete')),'stage_id':_safe_id(stage_id)}
         if result['complete'] and (sd/'stage.json').exists():
             result['inspection']=json.loads((sd/'stage.json').read_text(encoding='utf-8'))
         return result
 
-    def upload_chunk(self,stage_id,upload_id,name,total_size,offset,data,course_name=''):
+    def _finish_inspection(self,sd,stage_id,meta,state,part):
+        stage_path=sd/'stage.json'
+        count=len(json.loads(stage_path.read_text(encoding='utf-8')).get('sources',[])) if stage_path.exists() else 0
+        if count<=state.get('source_count',0):
+            self.inspect([(state['name'],part)],course_name=state.get('course_name',''),stage_id=stage_id)
+        state['complete']=True;state.pop('inspect_error',None);_json_dump(meta,state);part.unlink()
+
+    def _inspect_later(self,stage_id,uid):
+        """Inspect a fully received PDF once, in the background (one inspection at a time)."""
+        key=(_safe_id(stage_id),uid)
+        with self.running_lock:
+            if key in self.inspecting:return
+            self.inspecting.add(key)
+        def work():
+            sd=self._stage_dir(stage_id);meta=sd/'_uploads'/(uid+'.json');part=sd/'_uploads'/(uid+'.part')
+            try:
+                with self.inspect_lock:
+                    state=json.loads(meta.read_text(encoding='utf-8'))
+                    if not state.get('complete') and state['offset']==state['size'] and part.exists():
+                        self._finish_inspection(sd,stage_id,meta,state,part)
+            except Exception as error:
+                try:
+                    with self.upload_lock:
+                        state=json.loads(meta.read_text(encoding='utf-8'));state['inspect_error']=str(error)[:400];_json_dump(meta,state)
+                except Exception:pass
+            finally:
+                with self.running_lock:self.inspecting.discard(key)
+        threading.Thread(target=work,daemon=True).start()
+
+    def active_builds(self):
+        """Course builds that are queued or running, and builds that failed in the last day."""
+        out={}
+        for path in (COURSE_ROOT/'_jobs').glob('*.json'):
+            try:job=json.loads(path.read_text(encoding='utf-8'))
+            except Exception:continue
+            if job.get('id'):out[job['id']]=job
+        with self.jobs_lock:out.update({jid:dict(job) for jid,job in self.jobs.items()})
+        now=time.time();rows=[]
+        for job in out.values():
+            status=job.get('status')
+            if status in ('queued','running') or (status=='error' and now-float(job.get('updated_at') or 0)<86400):
+                rows.append({'id':job.get('id'),'course_id':job.get('course_id') or '','course_name':job.get('course_name') or 'Uploaded course','status':status,
+                             'progress':job.get('progress') or 0,'message':str(job.get('message') or '')[:300],'error':str(job.get('error') or '')[:300],
+                             'created_at':job.get('created_at') or 0,'updated_at':job.get('updated_at') or 0})
+        return sorted(rows,key=lambda row:-float(row['created_at'] or 0))
+
+    def upload_chunk(self,stage_id,upload_id,name,total_size,offset,data,course_name='',background=False):
         if not stage_id or not upload_id or not str(name).lower().endswith('.pdf'):
             raise ValueError('A valid stage, upload ID and PDF filename are required.')
-        if len(data)<1 or len(data)>2*1024*1024:raise ValueError('Upload chunks must be 2 MB or smaller.')
+        if len(data)<1 or len(data)>CHUNK_LIMIT:raise ValueError('Upload chunks must be 16 MB or smaller.')
         total_size=int(total_size);offset=int(offset)
         if total_size<=0 or total_size>320*1024*1024 or offset<0:raise ValueError('Invalid PDF size or upload offset.')
         sd=self._stage_dir(stage_id);ud=sd/'_uploads';ud.mkdir(parents=True,exist_ok=True)
@@ -791,6 +842,10 @@ class CourseManager(object):
                 stage_path=sd/'stage.json'
                 state['source_count']=len(json.loads(stage_path.read_text(encoding='utf-8')).get('sources',[])) if stage_path.exists() else 0
             _json_dump(mp,state)
+            if state['offset']==total_size and background:
+                # A long PDF is inspected in the background; the page polls upload status.
+                self._inspect_later(stage_id,uid)
+                return {'offset':total_size,'complete':False,'inspecting':True,'stage_id':_safe_id(stage_id)}
             if state['offset']==total_size:
                 # The completed file is durably staged before inspection; a lost
                 # response can be recovered through upload_status on refresh.

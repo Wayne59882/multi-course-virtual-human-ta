@@ -126,13 +126,71 @@ def inspect_page(page,number,ocr=None,activity=None,vision=None,mode=None):
     else:row['issues'].append(recovered.get('error','Local OCR unavailable.'))
     return row
 
+def ocr_workers():
+    """Tesseract processes run at once while reading scanned pages (one CPU thread each)."""
+    try:return max(1,int(os.environ.get('VQ_OCR_WORKERS') or 0)) if os.environ.get('VQ_OCR_WORKERS') else max(1,min(4,(os.cpu_count() or 2)//2))
+    except ValueError:return 1
+
+
+class PrefetchedOCR(object):
+    """Recognize upcoming scanned pages in parallel; read() returns the page's result when it was
+    prefetched and otherwise reads the page itself.  Pages are rendered in this (the main) thread."""
+    def __init__(self,ocr,workers):
+        from concurrent.futures import ThreadPoolExecutor
+        self.ocr=ocr;self.pool=ThreadPoolExecutor(max_workers=workers);self.futures={};self.window=workers*2
+
+    def __getattr__(self,name):
+        return getattr(self.ocr,name)
+
+    def ahead(self,doc,number,last,skip):
+        for ahead in range(number,min(last,number+self.window-1)+1):
+            if ahead in self.futures or skip(ahead):continue
+            page=doc[ahead-1]
+            if not _scanned_page(page):continue
+            try:self.futures[ahead]=self.pool.submit(self.ocr.recognize,self.ocr.render(page))
+            except Exception:continue
+        for old in [key for key in self.futures if key<number]:self.futures.pop(old).cancel()
+
+    def read(self,page):
+        future=self.futures.pop(int(page.number)+1,None)
+        return future.result() if future is not None else self.ocr.read(page)
+
+    def close(self):
+        for future in self.futures.values():future.cancel()
+        self.pool.shutdown(wait=False)
+
+
+def _scanned_page(page):
+    """No usable text layer but something drawn on it: text-first reading will OCR this page."""
+    try:
+        getter=getattr(page,'get_text',None) or getattr(page,'getText')
+        if sum(c.isalnum() for c in getter('text'))>=SLIDE_TEXT:return False
+        images=getattr(page,'get_images',None) or getattr(page,'getImageList',None)
+        return bool(images and images())
+    except Exception:return False
+
+
 def iter_pages(doc,start,end,cache_directory,source_identity,progress=None,ocr=None,vision=None,mode=None):
     mode=reading_mode(mode)
     ocr=ocr if ocr is not None else LocalOCR()
     vision=vision if vision is not None else LocalVision()
     directory=Path(cache_directory)/hashlib.sha256((REVISION+'|'+source_identity).encode()).hexdigest()[:24]
     directory.mkdir(parents=True,exist_ok=True)
-    for number in range(max(1,int(start)),min(int(end),doc.page_count)+1):
+    first,last=max(1,int(start)),min(int(end),doc.page_count)
+    # Scanned slides: several Tesseract processes at once instead of one page at a time.
+    prefetch=None
+    parallel=callable(getattr(ocr,'render',None)) and callable(getattr(ocr,'recognize',None)) and not getattr(ocr,'error','unknown')
+    if mode=='fast' and parallel and ocr_workers()>1:
+        prefetch=PrefetchedOCR(ocr,ocr_workers());ocr=prefetch
+    try:
+        for row in _pages(doc,first,last,directory,progress,ocr,vision,mode,prefetch):yield row
+    finally:
+        if prefetch is not None:prefetch.close()
+
+
+def _pages(doc,first,last,directory,progress,ocr,vision,mode,prefetch):
+    for number in range(first,last+1):
+        if prefetch is not None:prefetch.ahead(doc,number,last,lambda n:(directory/('%06d.json'%n)).exists())
         path=directory/('%06d.json'%number);cached=False;row=None
         if path.exists():
             try:

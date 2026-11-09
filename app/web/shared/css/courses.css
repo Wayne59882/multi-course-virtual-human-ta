@@ -48,3 +48,6 @@
 .v241-prep-done .v241-prep-icon{color:#1f8a4c}.v241-prep-done progress::-webkit-progress-value{background:#3a9d64}.v241-prep-done progress::-moz-progress-bar{background:#3a9d64}
 .v241-prep-waiting{color:#6b7f93}.v241-prep-waiting .v241-prep-icon{color:#9aaabb}.v241-prep-error .v241-prep-icon,.v241-prep-error .v241-prep-detail{color:#a12d2d}
 .v241-prep-note{font-size:12px;color:#5b7087;border-top:1px solid #edf2f7;padding-top:8px}
+.v241-builds{display:grid;gap:8px;margin-top:12px}.v241-builds[hidden]{display:none}.v241-build{margin-top:0}
+.v241-prep-head .v241-prep-error{background:#f3e8e8;color:#8f2f2f}.v241-prep-head .v241-prep-waiting{background:#eef2f6;color:#5b7087}
+.v241-build .v241-prep-label{font-weight:600;color:#42617e;overflow-wrap:anywhere}

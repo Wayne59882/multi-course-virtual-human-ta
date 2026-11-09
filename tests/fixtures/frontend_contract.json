@@ -208,15 +208,15 @@
       },
       {
         "old": "js/55_v241_course_adaptive_ta.js",
-        "query": "v=R18l-20261109",
-        "sha256": "158bb65e0e3b2ec302e9c23837493172da83ed90ab8c16f85832abef6399b24d",
+        "query": "v=R18m-20261109",
+        "sha256": "2da33e1b60dbc601ba2dfb8d7611a0fac4a155fd987e048cb5f10583f7e29b77",
         "new": "shared/js/course/course-controller.js",
         "previous_sha256": "bad39c56c62505ca5ce92bf96ef77b6ac7a941f8f3468cdb21ee85d13de8102f"
       },
       {
         "old": "js/57_role_access.js",
-        "query": "v=R18l-20261109",
-        "sha256": "ef7548edda83423797be3eac31af6cdc8a09976120ede69237b424bd4d5d170c",
+        "query": "v=R18m-20261109",
+        "sha256": "f09a8e20d5cd24e7a7bdc9468d13123a114dfdbf75770f38e16c84e655745e5b",
         "new": "shared/js/auth/role-access.js"
       },
       {
@@ -498,15 +498,15 @@
       },
       {
         "old": "js/55_v241_course_adaptive_ta.js",
-        "query": "v=R18l-20261109",
-        "sha256": "158bb65e0e3b2ec302e9c23837493172da83ed90ab8c16f85832abef6399b24d",
+        "query": "v=R18m-20261109",
+        "sha256": "2da33e1b60dbc601ba2dfb8d7611a0fac4a155fd987e048cb5f10583f7e29b77",
         "new": "shared/js/course/course-controller.js",
         "previous_sha256": "bad39c56c62505ca5ce92bf96ef77b6ac7a941f8f3468cdb21ee85d13de8102f"
       },
       {
         "old": "js/57_role_access.js",
-        "query": "v=R18l-20261109",
-        "sha256": "ef7548edda83423797be3eac31af6cdc8a09976120ede69237b424bd4d5d170c",
+        "query": "v=R18m-20261109",
+        "sha256": "f09a8e20d5cd24e7a7bdc9468d13123a114dfdbf75770f38e16c84e655745e5b",
         "new": "shared/js/auth/role-access.js"
       },
       {

@@ -122,37 +122,37 @@ async function refreshPending(){
     b.innerHTML='帳號審核'+(n?'<span class="vq-badge">'+n+'</span>':'');}catch(_){}
 }
 
-// Administrator: use the site exactly as a chosen teacher sees it, and return.
-function forgetCourse(){try{['VQ_V241_ACTIVE_COURSE_ID','VQ_V241_PENDING_COURSE_STAGE'].forEach(k=>localStorage.removeItem(k));if(window.indexedDB)indexedDB.deleteDatabase('VQCourseUpload');}catch(_){}}
+// Administrator: use the site exactly as a chosen teacher sees it, or as the administrator.
+// Each account keeps its own unfinished upload (course-controller), so switching loses nothing.
 async function actAs(id,cid){
   const r=await nativeFetch('/api/auth/act',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:id||null})}),d=await r.json().catch(()=>({}));
   if(!r.ok||!d.ok){window.alert(d.error||'無法切換。');return false;}
-  forgetCourse();try{if(cid)localStorage.setItem(ACTIVE_KEY,cid);}catch(_){}
+  try{localStorage.removeItem(ACTIVE_KEY);if(cid)localStorage.setItem(ACTIVE_KEY,cid);else sessionStorage.setItem('VQ_OPEN_NEWEST_COURSE','1');}catch(_){}
   location.reload();return true;
 }
-async function newestCourse(id){
-  try{const r=await nativeFetch('/api/reference/course-list',{cache:'no-store'}),d=await r.json();
-    return ((d.courses||[]).filter(c=>c.owner_id===id).sort((a,b)=>Number(b.created_at||0)-Number(a.created_at||0))[0]||{}).course_id||'';}catch(_){return '';}
-}
-async function fillTeachers(sel){
-  try{const r=await nativeFetch('/api/auth/admin/users',{cache:'no-store'}),d=await r.json();
-    sel.innerHTML='<option value="">切換老師</option>'+(d.users||[]).filter(u=>u.status==='approved'&&u.role==='teacher'&&!u.is_admin).map(u=>`<option value="${u.id}">${esc(u.name)}</option>`).join('');}catch(_){}
+async function fillAccounts(sel){
+  try{const r=await nativeFetch('/api/auth/act',{cache:'no-store'}),d=await r.json();if(!r.ok||!d.ok)return;
+    sel.innerHTML=`<option value="0">${esc(d.admin.name)}（管理員）</option>`+(d.teachers||[]).map(u=>`<option value="${u.id}">${esc(u.name)}</option>`).join('');
+    sel.value=String(d.acting_id||0);sel.hidden=false;}catch(_){}
 }
 function userBar(){
   const app=document.querySelector('.app');if(!app||$('vqUserBar'))return;
   const bar=document.createElement('div');bar.id='vqUserBar';bar.className='vq-userbar';
-  bar.innerHTML=(user.acting_admin?`<span class="vq-acting">管理員以 ${esc(user.name)} 的身分操作中</span><button type="button" id="vqActBack">回到管理員</button>`:'')+
+  const admin=user.is_admin||user.acting_admin;
+  bar.innerHTML=(user.acting_admin?`<span class="vq-acting">以 ${esc(user.name)} 的身分操作中</span>`:'')+
     `<span class="vq-who"><span>${esc(user.name)}</span><span class="vq-role">${esc(ROLE[user.role]||user.role)}</span></span>`+
-    (user.is_admin?'<select id="vqActAs" aria-label="切換老師"><option value="">切換老師</option></select><button type="button" id="vqAccountsBtn">帳號審核</button>':'')+
+    (admin?'<select id="vqActAs" aria-label="切換身分" title="切換身分" hidden></select>':'')+(user.is_admin?'<button type="button" id="vqAccountsBtn">帳號審核</button>':'')+
     (user.acting_admin?'':'<button type="button" id="vqPasswordBtn">修改密碼</button>')+'<button type="button" id="vqLogoutBtn">登出 Sign out</button>';
   app.insertBefore(bar,app.firstChild);
   $('vqLogoutBtn').addEventListener('click',signOut);
   if($('vqPasswordBtn'))$('vqPasswordBtn').addEventListener('click',changePassword);
-  if(user.acting_admin){const back=$('vqActBack');back.addEventListener('click',async()=>{back.disabled=true;let cid='';try{cid=localStorage.getItem(ACTIVE_KEY)||'';}catch(_){}if(!await actAs(null,cid))back.disabled=false;});}
-  if(user.is_admin){
-    $('vqAccountsBtn').addEventListener('click',accountsPanel);refreshPending();
-    const pick=$('vqActAs');fillTeachers(pick);
-    pick.addEventListener('change',async()=>{const id=Number(pick.value);if(!id)return;pick.disabled=true;if(!await actAs(id,await newestCourse(id))){pick.disabled=false;pick.value='';}});
+  if(user.is_admin){$('vqAccountsBtn').addEventListener('click',accountsPanel);refreshPending();}
+  if(admin){
+    const pick=$('vqActAs'),current=String(user.acting_admin?user.id:0);fillAccounts(pick);
+    pick.addEventListener('change',async()=>{const id=Number(pick.value);pick.disabled=true;
+      // Back to the administrator keeps the open course (the administrator sees every course).
+      let cid='';if(!id){try{cid=localStorage.getItem(ACTIVE_KEY)||'';}catch(_){}}
+      if(!await actAs(id,cid)){pick.disabled=false;pick.value=current;}});
   }
 }
 
@@ -186,7 +186,7 @@ async function teacherBuilder(b){
     if(!box){box=document.createElement('div');box.id='vqCourseCode';box.className='vq-code';(b.querySelector('.v241-active')||b).insertAdjacentElement('afterend',box);}
     box.innerHTML='學生課程代碼 Course code：<b>'+esc(code)+'</b><button type="button">複製</button><span>學生登入後輸入此代碼即可使用這門課。</span>';
     box.querySelector('button').addEventListener('click',e=>{try{navigator.clipboard.writeText(code);e.target.textContent='已複製';}catch(_){}});};
-  render();if(sel)sel.addEventListener('change',render);
+  render();if(sel)sel.addEventListener('change',render);document.addEventListener('vq-courses-loaded',render);
   if(user.is_admin){
     adminCourseTools(b,courses);
     // Opening another teacher's course switches to that teacher's view with the course open.

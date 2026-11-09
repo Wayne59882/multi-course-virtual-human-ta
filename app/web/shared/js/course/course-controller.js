@@ -3,14 +3,20 @@
 'use strict';
 const ACTIVE_KEY='VQ_V241_ACTIVE_COURSE_ID';
 const READY_NOTICE='VQ_V241_COURSE_READY';
-const PENDING_KEY='VQ_V241_PENDING_COURSE_STAGE';
-const DRAFT_KEY='current';
+const PENDING_BASE='VQ_V241_PENDING_COURSE_STAGE';
+const OPEN_NEWEST='VQ_OPEN_NEWEST_COURSE';
+let PENDING_KEY=PENDING_BASE,DRAFT_KEY='current',builds=[];
 const $=id=>document.getElementById(id);
 let activity=null,manifest=null,inspection=null,legacyAnswer=null,legacyCaseHTML='',quizState=null,adapterInstalled=false,draft=null,uploading=false,polling=false;
 
 function dbOpen(){return new Promise((resolve,reject)=>{if(!window.indexedDB){reject(new Error('This browser does not support resumable file storage.'));return;}const r=indexedDB.open('VQCourseUpload',1);r.onupgradeneeded=()=>r.result.createObjectStore('drafts');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});}
 async function draftIO(mode,value){const db=await dbOpen();return new Promise((resolve,reject)=>{const tx=db.transaction('drafts',mode),r=mode==='readonly'?tx.objectStore('drafts').get(DRAFT_KEY):tx.objectStore('drafts').put(value,DRAFT_KEY);let result;r.onsuccess=()=>{result=r.result;};r.onerror=()=>reject(r.error);tx.oncomplete=()=>{db.close();resolve(result);};tx.onerror=()=>{db.close();reject(tx.error);};});}
 async function saveDraft(){if(draft)await draftIO('readwrite',draft);}
+async function useAccountKeys(){
+  // Uploads are kept per account, so switching between the administrator and a teacher never loses one.
+  let id='';try{const r=await fetch('/api/auth/me',{cache:'no-store'}),d=await r.json();id=d&&d.user?String(d.user.id):'';}catch(_){}
+  if(id){DRAFT_KEY='current:'+id;PENDING_KEY=PENDING_BASE+':'+id;}
+}
 function newId(){return window.crypto&&crypto.randomUUID?crypto.randomUUID():Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);}
 function pendingStage(){try{return localStorage.getItem(PENDING_KEY)||'';}catch(_){return '';}}
 function setPending(v){try{if(v)localStorage.setItem(PENDING_KEY,v);else localStorage.removeItem(PENDING_KEY);}catch(_){}}
@@ -38,6 +44,7 @@ function injectBuilder(){
   <div class="v241-status" id="v241BuildStatus" role="status" aria-live="polite">Select searchable PDFs, inspect the teaching units, then build. Course Q&amp;A opens after extraction; reviewed exam-style questions become playable as soon as two per unit are ready.</div>
   <div class="v241-meters" id="v241WorkProgress" hidden><div id="v241MeterUpload" hidden><span>PDF upload</span><span id="v241LabelUpload"></span><progress id="v241BarUpload" max="100" value="0"></progress></div><div id="v241MeterActivate" hidden><span>Course activation</span><span id="v241LabelActivate"></span><progress id="v241BarActivate" max="100" value="0"></progress></div></div>
   <div class="v241-unit-wrap" id="v241UnitWrap" hidden><div class="v241-unit-title">Teaching units found — check each name and page range before building</div><div class="v241-unit-hint">✎ Click a unit name or page number to correct it. Untick units you do not need.</div><label class="v241-reading"><input type="checkbox" id="v241FullReading"> Read every slide image before the course opens (much slower). By default the course opens after the text is read, and images are read in the background.</label><div class="v241-unit-toolbar"><div class="v241-unit-summary" id="v241UnitSummary"></div><div class="v241-unit-buttons"><button type="button" id="v241SelectAll">Select all</button><button type="button" id="v241ClearAll">Clear all</button></div></div><div class="v241-unit-list" id="v241UnitList"></div></div>
+  <div class="v241-builds" id="v241Builds" hidden></div>
   <div class="v241-active"><div class="v241-field"><label for="v241ExistingCourses">Currently teaching</label><select class="v241-active-select" id="v241ExistingCourses"><option value="">Built-in Physiology (default)</option></select></div><div class="v241-actions" style="margin:0"><button type="button" id="v241DeleteCourse" disabled>Delete selected course</button></div></div><div class="v241-prep" id="v241Prep" hidden></div><div class="v241-sub">Select a saved course to teach or delete it when it is no longer needed. The built-in course cannot be deleted.</div>`;
   title.insertAdjacentElement('afterend',wrap);
   $('v241InspectBtn').addEventListener('click',inspectCourse);
@@ -60,6 +67,19 @@ async function inspectCourse(){
     await saveDraft();setPending(draft.stageId);await resumeUpload();
   }catch(e){setBuildStatus('Upload paused: '+String(e&&e.message||e)+'. Refresh to resume, or select the PDFs again.','error');btn.disabled=false;}
 }
+async function waitForInspection(base,i,count){
+  // Reading the outline of a long PDF can take minutes; the server does it in the background.
+  const started=Date.now();
+  for(;;){
+    const seconds=Math.round((Date.now()-started)/1000);
+    setMeter('Upload',100,'Inspecting teaching units… '+seconds+' s');setBuildStatus('PDF '+(i+1)+' / '+count+' received. Finding the teaching units… ('+seconds+' s). You may refresh; this continues on the server.');
+    const r=await fetch(base,{cache:'no-store'}),d=await r.json().catch(()=>({}));
+    if(!r.ok||!d.ok)throw new Error(d.error||('HTTP '+r.status));
+    if(d.complete)return d.inspection||null;
+    if(Date.now()-started>30*60*1000)throw new Error('Inspection is taking more than 30 minutes. Refresh to keep waiting.');
+    await new Promise(res=>setTimeout(res,3000));
+  }
+}
 async function resumeUpload(){
   if(!draft||uploading||draft.phase!=='uploading')return;uploading=true;$('v241InspectBtn').disabled=true;
   try{
@@ -68,13 +88,15 @@ async function resumeUpload(){
       const item=draft.files[i],file=item.file,base='/api/reference/course-upload-status?stage_id='+encodeURIComponent(draft.stageId)+'&upload_id='+encodeURIComponent(item.id);
       const s=await fetch(base,{cache:'no-store'}),state=await s.json();if(!s.ok||!state.ok)throw new Error(state.error||'Upload status unavailable');let offset=Number(state.offset||0);
       setMeter('Upload',100*(previousBytes+offset)/allBytes,Math.round(100*(previousBytes+offset)/allBytes)+'% · '+(i+1)+' / '+draft.files.length+' PDFs');
-      if(state.complete){inspection=state.inspection;draft.nextIndex=i+1;previousBytes+=file.size;await saveDraft();continue;}
+      if(!state.complete&&offset===file.size)state.inspection=await waitForInspection(base,i,draft.files.length);
+      if(state.complete||(offset===file.size&&state.inspection)){inspection=state.inspection;draft.nextIndex=i+1;previousBytes+=file.size;await saveDraft();continue;}
       while(offset<file.size){
-        const end=Math.min(offset+1024*1024,file.size),fd=new FormData();fd.append('stage_id',draft.stageId);fd.append('upload_id',item.id);fd.append('file_name',file.name);fd.append('total_size',String(file.size));fd.append('offset',String(offset));fd.append('course_name',draft.courseName);fd.append('chunk',file.slice(offset,end),file.name);
+        const end=Math.min(offset+8*1024*1024,file.size),fd=new FormData();fd.append('stage_id',draft.stageId);fd.append('upload_id',item.id);fd.append('file_name',file.name);fd.append('total_size',String(file.size));fd.append('offset',String(offset));fd.append('course_name',draft.courseName);fd.append('chunk',file.slice(offset,end),file.name);
         setBuildStatus(end===file.size?'PDF '+(i+1)+' / '+draft.files.length+' uploaded; inspecting teaching units…':'Uploading PDF '+(i+1)+' / '+draft.files.length+': '+file.name+' · '+Math.round(100*offset/file.size)+'%. You may refresh; upload resumes from the saved chunk.');
         let response,data;try{response=await fetch('/api/reference/course-upload-chunk',{method:'POST',body:fd,cache:'no-store'});data=await response.json();}catch(e){const check=await fetch(base,{cache:'no-store'}).then(r=>r.json());if(check.offset>offset||check.complete){data=check;}else throw e;}
         if(!data.ok||(!response?.ok&&response))throw new Error(data.detail||data.error||'Upload HTTP '+(response&&response.status));
         offset=Number(data.offset);if(data.inspection)inspection=data.inspection;
+        if(offset===file.size&&!data.complete)inspection=await waitForInspection(base,i,draft.files.length)||inspection;
         setMeter('Upload',100*(previousBytes+offset)/allBytes,Math.round(100*(previousBytes+offset)/allBytes)+'% · '+(i+1)+' / '+draft.files.length+' PDFs');
       }
       draft.nextIndex=i+1;previousBytes+=file.size;await saveDraft();
@@ -154,7 +176,9 @@ async function pollBuild(jid){
 
 async function loadCourseList(){
   const sel=$('v241ExistingCourses');if(!sel)return;
-  try{const r=await fetch('/api/reference/course-list',{cache:'no-store'}),d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||('HTTP '+r.status));const current=activeId();sel.innerHTML='<option value="">Built-in Physiology (default)</option>'+(d.courses||[]).map(c=>`<option value="${esc(c.course_id)}">${esc(c.course_name)} · ${Number(c.unit_count||0)} units${c.owner_name&&!c.owned?' · '+esc(c.owner_name):''} · ${esc(c.course_id.slice(-8))}</option>`).join('');if(current&&![...sel.options].some(x=>x.value===current)){setActiveId('');setBuildStatus('The previous course is unavailable. Built-in Physiology is active.','error');}sel.value=activeId();const del=$('v241DeleteCourse');if(del)del.disabled=!sel.value;}catch(e){setBuildStatus('Could not update the course list: '+String(e&&e.message||e),'error');}
+  try{const r=await fetch('/api/reference/course-list',{cache:'no-store'}),d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||('HTTP '+r.status));const current=activeId();sel.innerHTML='<option value="">Built-in Physiology (default)</option>'+(d.courses||[]).map(c=>`<option value="${esc(c.course_id)}">${esc(c.course_name)} · ${Number(c.unit_count||0)} units${c.owner_name&&!c.owned?' · '+esc(c.owner_name):''} · ${esc(c.course_id.slice(-8))}</option>`).join('');if(current&&![...sel.options].some(x=>x.value===current)){setActiveId('');setBuildStatus('The previous course is unavailable. Built-in Physiology is active.','error');}let newest=false;try{newest=!!sessionStorage.getItem(OPEN_NEWEST);sessionStorage.removeItem(OPEN_NEWEST);}catch(_){}
+    if(newest&&!activeId()){const latest=(d.courses||[]).slice().sort((a,b)=>Number(b.created_at||0)-Number(a.created_at||0))[0];if(latest)setActiveId(latest.course_id);}
+    sel.value=activeId();const del=$('v241DeleteCourse');if(del)del.disabled=!sel.value;document.dispatchEvent(new Event('vq-courses-loaded'));}catch(e){setBuildStatus('Could not update the course list: '+String(e&&e.message||e),'error');}
 }
 async function deleteSelectedCourse(){
   const sel=$('v241ExistingCourses'),cid=String(sel&&sel.value||'');if(!cid)return;
@@ -163,6 +187,19 @@ async function deleteSelectedCourse(){
   const btn=$('v241DeleteCourse');btn.disabled=true;
   try{const r=await fetch('/api/reference/course-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({course_id:cid}),cache:'no-store'}),d=await r.json().catch(()=>({}));if(!r.ok||!d.ok)throw new Error(d.detail||d.error||('HTTP '+r.status));if(activeId()===cid){setActiveId('');location.reload();return;}await loadCourseList();setBuildStatus('Deleted '+label+'.'+(d.stopped_background&&d.stopped_background.length?' Its background preparation was stopped.':''),'ok');}
   catch(e){setBuildStatus('Course deletion failed: '+String(e&&e.message||e),'error');btn.disabled=false;}
+}
+// Builds in progress for this account (from any browser); the administrator sees every teacher's.
+async function loadBuilds(){
+  const box=$('v241Builds');if(!box)return;
+  let list=[];try{const r=await fetch('/api/reference/course-builds',{cache:'no-store'});if(r.status===403){box.hidden=true;return 'stop';}const d=await r.json();if(!r.ok||!d.ok)return;list=d.builds||[];}catch(_){return;}
+  const before=new Set(builds.filter(b=>b.status!=='error').map(b=>b.id));builds=list;
+  const shown=list.filter(b=>b.id!==buildJobId);
+  box.innerHTML=shown.map(b=>{const failed=b.status==='error',waiting=b.status==='queued';
+    const label=failed?'Build stopped':waiting?'Waiting to build':'Building '+Math.round(Number(b.progress||0))+'%';
+    const detail=failed?(b.error||b.message||'Unknown error'):(b.message||'Working…');
+    return `<div class="v241-prep v241-build"><div class="v241-prep-head"><b>${esc(b.course_name)}${b.owner_name&&!b.owned?' · '+esc(b.owner_name):''}</b><span class="v241-prep-${failed?'error':waiting?'waiting':'working'}">${esc(label)}</span></div><div class="v241-prep-row v241-prep-${failed?'error':waiting?'waiting':'working'}"><span class="v241-prep-icon">${failed?'!':waiting?'…':'●'}</span><span class="v241-prep-label">${esc(detail)}</span><span class="v241-prep-detail"></span><progress max="100" value="${Math.round(Number(b.progress||0))}"></progress></div></div>`;}).join('');
+  box.hidden=!shown.length;
+  if([...before].some(id=>!list.some(b=>b.id===id&&b.status!=='error'))){await loadCourseList();if(!activeId())setBuildStatus('A course finished building. Select it in Currently teaching.','ok');}
 }
 async function loadManifest(cid){
   if(!cid){manifest=null;window.VQ_UPLOADED_COURSE_ACTIVE=false;applyVisualModule();return;}
@@ -401,6 +438,7 @@ async function restoreDraft(){
     }catch(e){setBuildStatus('Build is saved, but reconnect failed: '+String(e.message||e)+'. Refresh to retry.','error');}
   }
 }
-async function init(){injectBuilder();applyVisualModule();if(!legacyCaseHTML&&$('casePanel'))legacyCaseHTML=$('casePanel').innerHTML;await loadCourseList();const cid=activeId();if(cid)await loadManifest(cid);await restoreDraft();try{const notice=sessionStorage.getItem(READY_NOTICE);if(notice&&manifest){sessionStorage.removeItem(READY_NOTICE);setBuildStatus(notice,'ok');}}catch(_){}setInterval(refreshPreparation,4500);setTimeout(()=>{if(manifest)installAnswerAdapter();},2800);setTimeout(()=>{if(manifest)installAnswerAdapter();},4200);}
+async function init(){injectBuilder();applyVisualModule();if(!legacyCaseHTML&&$('casePanel'))legacyCaseHTML=$('casePanel').innerHTML;await useAccountKeys();await loadCourseList();const cid=activeId();if(cid)await loadManifest(cid);await restoreDraft();
+  if(await loadBuilds()!=='stop'){const timer=setInterval(async()=>{if(await loadBuilds()==='stop')clearInterval(timer);},5000);}try{const notice=sessionStorage.getItem(READY_NOTICE);if(notice&&manifest){sessionStorage.removeItem(READY_NOTICE);setBuildStatus(notice,'ok');}}catch(_){}setInterval(refreshPreparation,4500);setTimeout(()=>{if(manifest)installAnswerAdapter();},2800);setTimeout(()=>{if(manifest)installAnswerAdapter();},4200);}
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init,{once:true});else init();
 })();
