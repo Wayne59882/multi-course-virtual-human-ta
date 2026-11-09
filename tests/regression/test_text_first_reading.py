@@ -160,5 +160,29 @@ with tempfile.TemporaryDirectory() as temporary:
     conn = sqlite3.connect(str(vp)); left = {r[0] for r in conn.execute('SELECT chunk_id FROM vectors')}; conn.close()
     assert not left & set(ocr_ids), 'replaced OCR passages were left in the semantic index'
     assert manager.manifest(cid)['preparation']['figures']['ocr_pages_replaced'] == 3
+    # 8. A source re-read stopped by a server restart is resumed (it used to show its last page forever).
+    def interrupted(m):
+        m['preparation'].update({'sources': {'status': 'preparing', 'message': 'Reading saved PDF: page 2'}}); m['figure_pages'] = []
+    manager._update_manifest(cid, interrupted)
+    messages = []
+    real_update = manager._update_manifest
+    def watching(course, change):
+        result = real_update(course, change)
+        messages.append(str(((result or {}).get('preparation') or {}).get('sources', {}).get('message')))
+        return result
+    manager._update_manifest = watching
+    started = []
+    manager._start_preparation = lambda course, *args, **kwargs: started.append(course)
+    restarted = cr.CourseManager.__new__(cr.CourseManager); restarted.__dict__.update(manager.__dict__)
+    restarted.running = set()
+    restarted.resume_pending(lambda *a: '')
+    for _ in range(200):
+        if (restarted.manifest(cid)['preparation'].get('sources') or {}).get('status') != 'preparing': break
+        time.sleep(0.05)
+    sources = restarted.manifest(cid)['preparation']['sources']
+    assert sources['status'] == 'ready', sources
+    assert any(' / 3 pages)' in m for m in messages), messages
+    assert cid in started, 'preparation continues after the re-read'
+    assert len(restarted.manifest(cid)['figure_pages']) == 3, 'pages re-read text-first are queued for background image reading'
 print('[OK] text-first reading: slide text or OCR opens the course, images are read afterwards and reach Q&A in batches; '
-      'reviewed readings replace interim OCR text; pages with no text are still read by vision during the build; the R15 full reading remains selectable')
+      'reviewed readings replace interim OCR text; interrupted source re-reads resume with page counts; pages with no text are still read by vision during the build; the R15 full reading remains selectable')

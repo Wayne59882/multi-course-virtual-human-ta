@@ -942,6 +942,10 @@ class CourseManager(object):
                 man=self._update_manifest(man['course_id'],prepare_bank) or man
             man=self._quarantine_damaged_math(man)
             prep=man.get('preparation') or {}
+            if (prep.get('sources') or {}).get('status')=='preparing':
+                # A source re-read stopped by a restart would otherwise show its last page forever.
+                self._launch_repair(man['course_id'],man.get('model_key') or 'gemma',model_call)
+                continue
             if man.get('status') in ('preparing','error') or any((prep.get(k) or {}).get('status') in ('preparing','error','waiting') for k in ('questions','index','lectures','figures')):
                 self._start_preparation(man['course_id'],man.get('model_key') or 'gemma',model_call)
 
@@ -1195,24 +1199,31 @@ class CourseManager(object):
         manifest=self.manifest(cid)
         if not manifest:raise ValueError('course not found')
         if (manifest.get('source_review') or {}).get('required'):
-            key=(cid,'sources')
             with self.running_lock:
-                if key in self.running:return manifest
+                if (cid,'sources') in self.running:return manifest
                 if any(item[0]==cid for item in self.running):raise ValueError('Background preparation is still running. Retry source OCR after it finishes; ready units remain available.')
-                self.running.add(key)
-            self._update_manifest(cid,lambda m:m.setdefault('preparation',{}).update({'sources':{'status':'preparing','message':'Retrying source OCR from the saved original PDF'}}))
-            def repair():
-                try:
-                    with self.build_slots,self._background(cid):self._repair_sources(cid)
-                except Exception as error:
-                    self._update_manifest(cid,lambda m:m['preparation']['sources'].update({'status':'error','error':str(error)}))
-                finally:
-                    with self.running_lock:self.running.discard(key)
-                self._start_preparation(cid,model_key,model_call)
-            threading.Thread(target=repair,daemon=True).start()
+            self._launch_repair(cid,model_key,model_call)
             return self.manifest(cid)
         self._start_preparation(cid,model_key,model_call,force=True)
         return self.manifest(cid)
+
+    def _launch_repair(self,cid,model_key,model_call):
+        """Re-read problem pages from the saved original in the background, then continue preparation."""
+        key=(cid,'sources')
+        with self.running_lock:
+            if key in self.running:return
+            self.running.add(key)
+        self._update_manifest(cid,lambda m:m.setdefault('preparation',{}).update({'sources':{'status':'preparing','message':'Retrying source OCR from the saved original PDF','started_at':time.time()}}))
+        def repair():
+            try:
+                with self.build_slots,self._background(cid):self._repair_sources(cid)
+            except CourseDeleted:return
+            except Exception as error:
+                self._update_manifest(cid,lambda m:m['preparation']['sources'].update({'status':'error','error':str(error)[:400]}))
+            finally:
+                with self.running_lock:self.running.discard(key)
+            self._start_preparation(cid,model_key,model_call)
+        threading.Thread(target=repair,daemon=True).start()
 
     def _repair_sources(self,cid):
         """Retry problem pages from retained originals; preserve unchanged banks."""
@@ -1220,14 +1231,19 @@ class CourseManager(object):
         stage=json.loads((sd/'stage.json').read_text(encoding='utf-8'))
         selected={unit['id']:unit for unit in stage['units']}
         chunks=[];texts={};qualities={};changed=set()
+        total=sum(int(selected[u['id']]['end_page'])-int(selected[u['id']]['start_page'])+1 for u in m['units']);seen=set();pending=[]
         for unit in m['units']:
             spec=selected[unit['id']];uid=unit['id']
             source=next(row for row in stage['sources'] if row['file_name']==spec['source_file'])
-            def progress(row,cached):
-                self._update_manifest(cid,lambda current:current['preparation']['sources'].update({'current_page':row['page'],'message':('Local OCR' if row['status']=='ocr_running' else 'Reading saved PDF')+': page '+str(row['page'])}))
+            def progress(row,cached,uid=uid):
+                if row['status'] not in ('ocr_running','vision_running'):seen.add((uid,row['page']))
+                label='Local OCR' if row['status']=='ocr_running' else 'Local visual reading' if row['status']=='vision_running' else 'Reading saved PDF'
+                self._update_manifest(cid,lambda current:current['preparation']['sources'].update({'current_page':row['page'],'completed':len(seen),'total':total,'updated_at':time.time(),
+                    'message':'%s: page %s (%s / %s pages)'%(label,row['page'],len(seen),total)}))
             with closing(fitz.open(str(cd/'source'/spec['source_file']))) as doc:
                 pages=list(iter_pages(doc,spec['start_page'],spec['end_page'],sd/'page_cache',source.get('sha256') or spec['source_file'],progress))
             quality=unit_quality(pages);text=_safe_source_text('\n\n'.join(row['text'] for row in pages if row['text']))
+            pending.extend({'unit_id':uid,'source_file':spec['source_file'],'page':row['page']} for row in pages if row.get('figure_pending'))
             if sum(c.isalpha() for c in text)<40:text='';quality['status']='needs_review'
             previous=cd/'units'/(uid+'.txt')
             if not previous.exists() or previous.read_text(encoding='utf-8')!=text:changed.add(uid)
@@ -1254,6 +1270,12 @@ class CourseManager(object):
             os.replace(str(temporary),str(cd/'chunks.jsonl'))
             for kind in ('lectures','questions','index'):m['preparation'].setdefault(kind,{}).update({'status':'preparing','error':''})
         atomic_json(cd/'source_quality.json',qualities)
+        # Pages re-read text-first still get their images read (and reviewed) in the background.
+        known={(row['source_file'],int(row['page'])) for row in m.get('figure_pages') or []}
+        added=[row for row in pending if (row['source_file'],int(row['page'])) not in known]
+        if added:
+            m['figure_pages']=list(m.get('figure_pages') or [])+added
+            m['preparation']['figures']={'status':'waiting','completed':0,'total':len(m['figure_pages']),'message':'Figures are read after lectures are ready'}
         m['source_review']={'required':any(q['status']!='readable' for q in qualities.values()),'units':qualities}
         if changed:m['status']='preparing' if chunks else 'source_review'
         m['preparation']['sources']={'status':'ready','message':'Source OCR retry finished; remaining gaps are listed in upload diagnostics'}
