@@ -25,7 +25,8 @@ REVISION='R15'
 #   background: like inline, but text-rich pages defer their figures.  off: never read figures.
 FIGURES_MODE=os.environ.get('VQ_PDF_VISION_FIGURES','fast').strip().lower()
 READING_MODES=('fast','inline','background','off')
-USABLE_TEXT=40  # letters/digits a page needs before it can be taught from without the vision model
+USABLE_TEXT=40  # letters/digits OCR must recover before a page can be taught from without the vision model
+SLIDE_TEXT=10   # a slide's own text (e.g. its title) is enough to open the course; its images follow in the background
 
 def reading_mode(value=None):
     value=str(value or FIGURES_MODE).strip().lower()
@@ -69,7 +70,7 @@ def inspect_page(page,number,ocr=None,activity=None,vision=None,mode=None):
             # course build for a slow two-pass vision reading of this figure.
             if mode!='off':row['figure_pending']=True
             return row
-        if mode=='fast' and sum(c.isalnum() for c in row['text'])>=USABLE_TEXT:
+        if mode=='fast' and sum(c.isalnum() for c in row['text'])>=SLIDE_TEXT:
             # Slide titles and bullets are enough to open the course; images follow.
             row['figure_pending']=True
             return row
@@ -91,7 +92,7 @@ def inspect_page(page,number,ocr=None,activity=None,vision=None,mode=None):
         row={'page':int(number),'text':text,'status':'partial' if text else 'needs_review',
                 'issues':[str(error)[:600]],'image_content_read':False}
     if mode=='fast':
-        if sum(c.isalnum() for c in row['text'])>=USABLE_TEXT:
+        if sum(c.isalnum() for c in row['text'])>=SLIDE_TEXT:
             row.update({'figure_pending':True,'ocr_config':ocr.fingerprint,'vision_config':vision.fingerprint})
             return row
         # No usable text layer: local OCR now (seconds), the vision model later.

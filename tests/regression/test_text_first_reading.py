@@ -62,6 +62,10 @@ slide(doc, image=True)                                                          
 vision, ocr = Vision(), OCR('Northern blot detects RNA molecules after gel electrophoresis and transfer.')
 row = ingestion.inspect_page(doc[0], 1, ocr=ocr, vision=vision)
 assert row['status'] == 'readable' and row.get('figure_pending') and 'Southern blot' in row['text'] and not vision.calls and not ocr.calls, row
+# 1b. A slide whose only text is its title also opens at once; its image follows.
+titled = fitz.open(); slide(titled, 'Southern blot')
+row = ingestion.inspect_page(titled[0], 1, ocr=OCR(''), vision=vision)
+assert row.get('figure_pending') and 'Southern blot' in row['text'] and not vision.calls, row
 # 2. Image-only slide: OCR now, vision later.
 row = ingestion.inspect_page(doc[1], 2, ocr=ocr, vision=vision)
 assert row['extraction_method'] == 'local_ocr' and row.get('figure_pending') and 'Northern blot' in row['text'] and not vision.calls, row
