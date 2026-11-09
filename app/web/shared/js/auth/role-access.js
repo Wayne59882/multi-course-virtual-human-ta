@@ -41,6 +41,7 @@ body:not(.vq-role-teacher):not(.vq-role-student) #v241CourseBuilder{visibility:h
 .vq-join button,.vq-code button{min-height:40px;padding:8px 14px!important;border-radius:9px!important;border:1px solid #8fb4d9!important;background:#fff;color:#174d7f;font-weight:800!important;font-size:14px!important;box-shadow:none!important;cursor:pointer}
 .vq-join .vq-join-msg{flex-basis:100%;font-size:13px;color:#42617e}.vq-join .vq-join-msg.err{color:#8f2f2f}
 .vq-code{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px;padding:10px 12px;border-radius:10px;background:#eef8f6;border:1px solid #cde8e3;color:#1e4d47;font-size:13px}
+.vq-code select{width:auto!important;flex:0 1 auto;border:1px solid #b8cce1;border-radius:8px;padding:5px 8px;font:inherit;background:#fff;color:#173f69;max-width:100%}
 .vq-code b{font-size:18px;letter-spacing:.18em;color:#0f5e57;font-family:ui-monospace,Menlo,Consolas,monospace}
 .vq-modal{position:fixed;inset:0;background:rgba(15,35,60,.45);display:grid;place-items:center;z-index:99999;padding:16px}
 .vq-modal>div{background:#fff;border-radius:16px;max-width:900px;width:100%;max-height:86vh;overflow:auto;padding:20px;box-shadow:0 20px 50px rgba(0,0,0,.25);color:#1d3550}
@@ -150,15 +151,43 @@ function studentBuilder(b){
 
 async function teacherBuilder(b){
   const sub=b.querySelector('.v241-active+.v241-sub');
-  if(sub)sub.textContent='只有您看得到自己上傳的課程；其他老師看不到。選擇課程後把課程代碼提供給學生，學生輸入代碼即可使用該課程。內建課程不能刪除。';
-  let codes={};
-  try{const r=await nativeFetch('/api/reference/course-list',{cache:'no-store'}),d=await r.json();(d.courses||[]).forEach(c=>{if(c.access_code)codes[c.course_id]=c.access_code;});}catch(_){}
+  if(sub)sub.textContent=user.is_admin?'管理員可管理所有老師的課程：刪除、代老師上傳、轉移擁有者。選擇課程後把課程代碼提供給學生。內建課程不能刪除。':'只有您看得到自己上傳的課程；其他老師看不到。選擇課程後把課程代碼提供給學生，學生輸入代碼即可使用該課程。內建課程不能刪除。';
+  let codes={},courses={};
+  try{const r=await nativeFetch('/api/reference/course-list',{cache:'no-store'}),d=await r.json();(d.courses||[]).forEach(c=>{courses[c.course_id]=c;if(c.access_code)codes[c.course_id]=c.access_code;});}catch(_){}
   const sel=$('v241ExistingCourses');
   const render=()=>{let box=$('vqCourseCode');const cid=sel&&sel.value,code=cid&&codes[cid];
     if(!code){if(box)box.remove();return;}
     if(!box){box=document.createElement('div');box.id='vqCourseCode';box.className='vq-code';(b.querySelector('.v241-active')||b).insertAdjacentElement('afterend',box);}
     box.innerHTML='學生課程代碼 Course code：<b>'+esc(code)+'</b><button type="button">複製</button><span>學生登入後輸入此代碼即可使用這門課。</span>';
     box.querySelector('button').addEventListener('click',e=>{try{navigator.clipboard.writeText(code);e.target.textContent='已複製';}catch(_){}});};
+  render();if(sel)sel.addEventListener('change',render);
+  if(user.is_admin)adminCourseTools(b,courses);
+}
+
+// Administrator: build a course for another teacher, and move a saved course to another teacher.
+async function adminCourseTools(b,courses){
+  let people=[];
+  try{const r=await nativeFetch('/api/auth/admin/users',{cache:'no-store'}),d=await r.json();people=(d.users||[]).filter(u=>u.status==='approved'&&(u.role==='teacher'||u.is_admin));}catch(_){}
+  if(!people.length)return;
+  const options=pick=>people.map(u=>`<option value="${u.id}"${u.id===pick?' selected':''}>${esc(u.name)} · ${esc(u.email)}</option>`).join('');
+  const grid=b.querySelector('.v241-grid');
+  if(grid&&!$('vqBuildOwner')){const f=document.createElement('div');f.className='v241-field';f.innerHTML='<label for="vqBuildOwner">Course Owner</label><select id="vqBuildOwner">'+options(user.id)+'</select>';grid.appendChild(f);}
+  const sel=$('v241ExistingCourses');
+  const render=()=>{let box=$('vqCourseOwner');const c=courses[sel&&sel.value];
+    if(!c){if(box)box.remove();return;}
+    if(!box){box=document.createElement('div');box.id='vqCourseOwner';box.className='vq-code';($('vqCourseCode')||b.querySelector('.v241-active')||b).insertAdjacentElement('afterend',box);}
+    box.innerHTML='課程擁有者 Owner：<select aria-label="Course owner">'+options(c.owner_id)+'</select><span></span>';
+    const pick=box.querySelector('select'),msg=box.querySelector('span');
+    pick.addEventListener('change',async()=>{
+      const id=Number(pick.value),person=people.find(u=>u.id===id)||{};
+      if(!window.confirm('把「'+c.course_name+'」轉給 '+person.name+'？')){pick.value=String(c.owner_id);return;}
+      pick.disabled=true;msg.textContent='處理中…';
+      try{const r=await nativeFetch('/api/auth/admin/course-owner',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({course_id:c.course_id,user_id:id})}),d=await r.json().catch(()=>({}));
+        if(!r.ok||!d.ok)throw new Error(d.error||'無法變更擁有者。');
+        c.owner_id=id;c.owner_name=d.owner_name||person.name;c.owned=id===user.id;msg.textContent='已轉移。';
+        const opt=sel.options[sel.selectedIndex];if(opt&&opt.value===c.course_id)opt.textContent=c.course_name+' · '+Number(c.unit_count||0)+' units'+(c.owned?'':' · '+c.owner_name)+' · '+c.course_id.slice(-8);
+      }catch(e){pick.value=String(c.owner_id);msg.textContent=String(e&&e.message||e);}
+      pick.disabled=false;});};
   render();if(sel)sel.addEventListener('change',render);
 }
 
@@ -173,9 +202,10 @@ async function init(){
   if(!r.ok)return;
   const d=await r.json().catch(()=>null);if(!d||!d.user)return;
   user=d.user;window.VQ_AUTH_USER=user;
-  document.body.classList.add(user.role==='teacher'?'vq-role-teacher':'vq-role-student');
+  const teacher=user.role==='teacher'||user.is_admin;
+  document.body.classList.add(teacher?'vq-role-teacher':'vq-role-student');
   userBar();
-  whenBuilder(b=>user.role==='teacher'?teacherBuilder(b):studentBuilder(b));
+  whenBuilder(b=>teacher?teacherBuilder(b):studentBuilder(b));
 }
 css();
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init,{once:true});else init();

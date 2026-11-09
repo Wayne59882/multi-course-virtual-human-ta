@@ -103,6 +103,7 @@ async function buildCourse(){
   if(!inspection){setBuildStatus('Inspect the uploaded PDFs first.','error');return;}const units=selectedUnits();if(!units.length){setBuildStatus('Select at least one chapter/unit.','error');return;}const problem=unitProblem(units);if(problem){setBuildStatus(problem,'error');return;}
   const full=$('v241FullReading');
   const body={stage_id:inspection.stage_id,course_name:String($('v241CourseName').value||'').trim(),units,model_key:modelKey(),reading:full&&full.checked?'inline':'fast'};
+  const owner=$('vqBuildOwner');if(owner&&owner.value)body.owner_id=Number(owner.value);
   $('v241BuildBtn').disabled=true;setMeter('Activate',0,'Extracting course material');setBuildStatus('Extracting selected units for course Q&A. You may refresh; the server continues the build.');
   try{
     if(draft){draft.phase='building';draft.buildBody=body;await saveDraft();setPending(draft.stageId);}
@@ -154,7 +155,7 @@ async function pollBuild(jid){
 
 async function loadCourseList(){
   const sel=$('v241ExistingCourses');if(!sel)return;
-  try{const r=await fetch('/api/reference/course-list',{cache:'no-store'}),d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||('HTTP '+r.status));const current=activeId();sel.innerHTML='<option value="">Built-in Physiology (default)</option>'+(d.courses||[]).map(c=>`<option value="${esc(c.course_id)}">${esc(c.course_name)} · ${Number(c.unit_count||0)} units · ${esc(c.course_id.slice(-8))}</option>`).join('');if(current&&![...sel.options].some(x=>x.value===current)){setActiveId('');setBuildStatus('The previous course is unavailable. Built-in Physiology is active.','error');}sel.value=activeId();const del=$('v241DeleteCourse');if(del)del.disabled=!sel.value;}catch(e){setBuildStatus('Could not update the course list: '+String(e&&e.message||e),'error');}
+  try{const r=await fetch('/api/reference/course-list',{cache:'no-store'}),d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||('HTTP '+r.status));const current=activeId();sel.innerHTML='<option value="">Built-in Physiology (default)</option>'+(d.courses||[]).map(c=>`<option value="${esc(c.course_id)}">${esc(c.course_name)} · ${Number(c.unit_count||0)} units${c.owner_name&&!c.owned?' · '+esc(c.owner_name):''} · ${esc(c.course_id.slice(-8))}</option>`).join('');if(current&&![...sel.options].some(x=>x.value===current)){setActiveId('');setBuildStatus('The previous course is unavailable. Built-in Physiology is active.','error');}sel.value=activeId();const del=$('v241DeleteCourse');if(del)del.disabled=!sel.value;}catch(e){setBuildStatus('Could not update the course list: '+String(e&&e.message||e),'error');}
 }
 async function deleteSelectedCourse(){
   const sel=$('v241ExistingCourses'),cid=String(sel&&sel.value||'');if(!cid)return;

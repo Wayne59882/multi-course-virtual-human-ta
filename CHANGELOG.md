@@ -1,5 +1,12 @@
 # Change Log
 
+## R18h — 2026-11-09
+
+- 管理員（VQ_AUTH_ADMIN_EMAIL 的帳號）可以管理所有老師的課程：課程清單列出全部課程並標示擁有者，可以開啟、刪除、重試背景準備、查看與取消任何老師的建課進度。一般老師仍只看得到自己的課程，學生仍需課程代碼。
+- 管理員可以代老師上傳：建課區多一個「Course Owner」選單，選擇已核准的老師後建出的課程直接屬於那位老師（老師登入後就看得到）。已存在的課程也可以在「課程擁有者 Owner」選單轉給另一位老師。
+- OCR 安裝程式（install_ocr_user.sh）：伺服器連 GitHub 逾時（504）時，語言檔改從 jsDelivr 或 npm（tesseract.js-data）下載，micromamba 也有備用來源；重跑時沿用已下載的 Tesseract。安裝完成前會實際用 OCR 讀一頁測試。
+- OCR 改以命令列指定語言資料夾（--tessdata-dir）並以設定值輸出 TSV，不再依賴語言資料夾裡的 configs/tsv；另外下載的語言資料夾也能正確讀出文字位置與信心分數。
+
 ## R18g — 2026-11-09
 
 - 不需要管理員權限也能安裝 OCR：scripts/setup/install_ocr_user.sh 把 Tesseract（英文＋繁體中文）裝在自己的資料夾（預設 /work103/wayne6/ocr），並寫入 <網站資料夾>/logs/tesseract.json；網站會自動找到它，不用重新啟動。先用 conda-forge（micromamba），失敗時改用 GitHub 上的 Tesseract AppImage。

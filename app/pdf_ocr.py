@@ -42,7 +42,7 @@ class LocalOCR:
         elif not re.fullmatch(r'[a-zA-Z0-9_+/-]+',self.requested):self.error='Invalid OCR language setting.'
         else:
             try:
-                result=subprocess.run([self.executable,'--list-langs'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=self._env(),timeout=10)
+                result=subprocess.run([self.executable]+self._dir()+['--list-langs'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=self._env(),timeout=10)
                 available=result.stdout.decode('utf-8',errors='replace').splitlines()[1:]
                 self.languages=[x.strip() for x in available if x.strip()]
                 missing=[x for x in self.requested.split('+') if x not in self.languages]
@@ -54,6 +54,10 @@ class LocalOCR:
         env=dict(os.environ)
         if self.tessdata:env['TESSDATA_PREFIX']=self.tessdata
         return env
+
+    def _dir(self):
+        # Also on the command line: a packaged Tesseract (AppImage) may set its own TESSDATA_PREFIX.
+        return ['--tessdata-dir',self.tessdata] if self.tessdata else []
 
     def report(self):
         return {'engine':'tesseract','available':not bool(self.error),'languages':self.requested,
@@ -73,7 +77,9 @@ class LocalOCR:
             with tempfile.TemporaryDirectory(prefix='course-ocr-') as temporary:
                 image=Path(temporary)/'page.png';pixmap.save(str(image));del pixmap
                 env=self._env();env['OMP_THREAD_LIMIT']='1'
-                result=subprocess.run([self.executable,str(image),'stdout','-l',self.requested,'--psm','3','tsv'],
+                # TSV is requested as a setting, not the 'tsv' config file, which a separately
+                # downloaded language folder does not include.
+                result=subprocess.run([self.executable,str(image),'stdout']+self._dir()+['-l',self.requested,'--psm','3','-c','tessedit_create_tsv=1'],
                     stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,timeout=45)
                 if result.returncode:raise RuntimeError(result.stderr.decode('utf-8',errors='replace')[:300])
             return parse_tsv(result.stdout.decode('utf-8',errors='replace'))

@@ -456,20 +456,36 @@ def is_enrolled(user_id, course_id):
 
 
 def can_access(user, course_id):
-    owner = course_owner(course_id)
-    if owner is not None:
-        if owner == user['id']:
-            return True
-    elif user['is_admin'] and user['role'] == 'teacher':
-        return True  # courses built before accounts existed belong to the administrator
+    if user.get('is_admin'):
+        return True  # the administrator manages every teacher's courses
+    if course_owner(course_id) == user['id']:
+        return True
     return user['role'] == 'student' and is_enrolled(user['id'], course_id)
 
 
 def is_owner(user, course_id):
-    owner = course_owner(course_id)
-    if owner is None:
-        return user['is_admin'] and user['role'] == 'teacher'
-    return owner == user['id']
+    return bool(user.get('is_admin')) or course_owner(course_id) == user['id']
+
+
+def teacher_account(user_id):
+    """An approved teacher (or the administrator) who may own courses; None otherwise."""
+    try:
+        row = user_by_id(int(user_id))
+    except (TypeError, ValueError):
+        return None
+    if row and row['status'] == 'approved' and (row['role'] == 'teacher' or row['email'] == admin_email()):
+        return row
+    return None
+
+
+def set_course_owner(course_id, owner_id):
+    def work(c):
+        if c.execute('SELECT 1 FROM courses WHERE course_id=?', (course_id,)).fetchone():
+            c.execute('UPDATE courses SET owner_id=? WHERE course_id=?', (owner_id, course_id))
+        else:
+            c.execute('INSERT INTO courses(course_id,owner_id,code,created_at) VALUES(?,?,?,?)',
+                      (course_id, owner_id, _new_code(c), time.time()))
+    _run(work)
 
 
 # ---------------------------------------------------------------- API gate
@@ -504,7 +520,8 @@ def authorize(user, path, query, body, ctype):
     if seg=='course-admin-uploads' and not user.get('is_admin'):
         return _deny(403,'admin_only','Only the administrator can inspect all uploads.'),ctx
     teacher_only = seg in diagnostic_ops or seg in TEACHER_ONLY or seg.startswith('course-ai-')
-    if teacher_only and user['role'] != 'teacher':
+    admin = bool(user.get('is_admin'))
+    if teacher_only and user['role'] != 'teacher' and not admin:
         return _deny(403, 'teacher_only', 'Only teachers can upload or manage course materials.'), ctx
 
     def first(name):
@@ -517,9 +534,9 @@ def authorize(user, path, query, body, ctype):
     if stage_id:
         ctx['stage_id'] = stage_id
         row = _one('SELECT owner_id FROM stages WHERE stage_id=?', (stage_id,))
-        if seg in diagnostic_ops and not row and not user.get('is_admin'):
+        if seg in diagnostic_ops and not row and not admin:
             return _deny(403,'stage_forbidden','Upload ownership could not be verified.'),ctx
-        if row and row['owner_id'] != user['id'] and not (seg in diagnostic_ops and user.get('is_admin')):
+        if row and row['owner_id'] != user['id'] and not admin:
             return _deny(403, 'stage_forbidden', 'This upload belongs to another teacher.'), ctx
         if not row and teacher_only and seg not in diagnostic_ops:
             _exec('INSERT OR IGNORE INTO stages(stage_id,owner_id,created_at) VALUES(?,?,?)',
@@ -527,10 +544,16 @@ def authorize(user, path, query, body, ctype):
     if seg in ('course-job-status', 'course-build-cancel'):
         job_id = first('id') or first('job_id')
         row = _one('SELECT owner_id FROM jobs WHERE job_id=?', (job_id,)) if job_id else None
-        if row and row['owner_id'] != user['id']:
+        if row and row['owner_id'] != user['id'] and not admin:
             return _deny(403, 'job_forbidden', 'This course build belongs to another teacher.'), ctx
-        if seg == 'course-build-cancel' and not row and not user.get('is_admin'):
+        if seg == 'course-build-cancel' and not row and not admin:
             return _deny(403, 'job_forbidden', 'Only the teacher who started this build can cancel it.'), ctx
+    if seg == 'course-build' and admin and data is not None and data.get('owner_id') not in (None, ''):
+        # The administrator can build a course on behalf of another teacher.
+        owner = teacher_account(data.get('owner_id'))
+        if not owner:
+            return _deny(400, 'owner_invalid', 'Choose an approved teacher as the course owner.'), ctx
+        ctx['owner_id'] = owner['id']
     course_id = first('course_id') or (first('id') if seg == 'course-status' else '')
     if course_id:
         ctx['course_id'] = course_id
@@ -560,35 +583,45 @@ def after_response(user, ctx, status, data, ctype):
         return json.dumps(payload,ensure_ascii=False).encode('utf-8')
     if seg == 'course-list':
         courses = payload.get('courses') if isinstance(payload.get('courses'), list) else []
+        admin = bool(user.get('is_admin'))
+        people = {row['id']: row for row in _all('SELECT id,name,email FROM users')} if admin else {}
         kept = []
         for course in courses:
             cid = str((course or {}).get('course_id') or '')
             if not cid:
                 continue
-            if user['role'] == 'teacher':
+            if user['role'] == 'teacher' or admin:
                 owner = course_owner(cid)
-                if owner is None and user['is_admin']:
-                    owner = record_course(cid, user['id'])
-                if owner == user['id']:
+                if owner is None and admin:
+                    owner = record_course(cid, user['id'])  # courses built before accounts existed
+                if owner == user['id'] or admin:
                     course = dict(course)
                     course['access_code'] = course_code(cid)
-                    course['owned'] = True
+                    course['owned'] = owner == user['id']
+                    if admin:
+                        person = people.get(owner)
+                        course['owner_id'] = owner
+                        course['owner_name'] = (person['name'] or '') if person else ''
+                        course['owner_email'] = (person['email'] or '') if person else ''
                     kept.append(course)
             elif is_enrolled(user['id'], cid):
                 kept.append(course)
         payload['courses'] = kept
         payload['role'] = user['role']
         return json.dumps(payload, ensure_ascii=False).encode('utf-8')
-    if user['role'] == 'teacher' and seg in ('course-build', 'course-job-status', 'course-stage-status'):
+    if (user['role'] == 'teacher' or user.get('is_admin')) and seg in ('course-build', 'course-job-status', 'course-stage-status'):
         job = payload.get('job') if isinstance(payload.get('job'), dict) else (payload if seg == 'course-job-status' else None)
         if job:
             cid = str(job.get('course_id') or ((job.get('result') or {}).get('course_id') if isinstance(job.get('result'), dict) else '') or '')
             jid = str(job.get('id') or '')
+            owner = ctx.get('owner_id') or user['id']
             if jid:
                 _exec('INSERT OR IGNORE INTO jobs(job_id,owner_id,course_id,created_at) VALUES(?,?,?,?)',
-                      (jid, user['id'], cid, time.time()))
+                      (jid, owner, cid, time.time()))
+                row = _one('SELECT owner_id FROM jobs WHERE job_id=?', (jid,))
+                owner = row['owner_id'] if row else owner  # the teacher the build was started for
             if cid:
-                record_course(cid, user['id'])
+                record_course(cid, owner)
     if seg == 'course-delete' and payload.get('ok') and ctx.get('course_id'):
         cid = ctx['course_id']
         _run(lambda c: (c.execute('DELETE FROM enrollments WHERE course_id=?', (cid,)),
@@ -864,6 +897,17 @@ def handle(handler, method, path, query):
                 updated = _decide(target['id'], action)
                 sent, _why = _notify_applicant(updated, action) if target['status'] == 'pending' else (False, '')
                 return _reply(handler, 200, {'ok': True, 'user': public_user(updated), 'notified': sent})
+            if path == '/api/auth/admin/course-owner' and method == 'POST':
+                d = _body_json(handler)
+                cid = str(d.get('course_id') or '').strip()[:200]
+                target = teacher_account(d.get('user_id'))
+                if not cid or not re.match(r'^[A-Za-z0-9_.-]+$', cid):
+                    return _reply(handler, 400, {'ok': False, 'error': '無效的課程。'})
+                if not target:
+                    return _reply(handler, 400, {'ok': False, 'error': '請選擇已核准的老師。'})
+                set_course_owner(cid, target['id'])
+                _log('course %s assigned to %s' % (cid, target['email']))
+                return _reply(handler, 200, {'ok': True, 'course_id': cid, 'owner_id': target['id'], 'owner_name': target['name']})
             if path == '/api/auth/admin/reset-password' and method == 'POST':
                 try:
                     target = user_by_id(int(_body_json(handler).get('user_id')))
