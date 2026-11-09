@@ -55,6 +55,10 @@ with tempfile.TemporaryDirectory() as temporary:
             break
         time.sleep(0.05)
     assert status['complete'] and status['inspection']['units'], status
+    for _ in range(100):  # the inspection thread finishes just after it marks the upload complete
+        if not manager.inspecting:
+            break
+        time.sleep(0.02)
     assert len(manager.inspecting) == 0
     # A failed inspection is reported instead of waiting forever.
     manager.inspect = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError('outline unreadable'))
