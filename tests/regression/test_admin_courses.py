@@ -153,9 +153,18 @@ with tempfile.TemporaryDirectory() as temporary:
                                       {'id': 'other-build', 'course_name': 'Other', 'status': 'queued'},
                                       {'id': 'unknown-build', 'course_name': 'Legacy', 'status': 'running'}]}
     assert [b['id'] for b in respond(acting, {'seg': 'course-builds'}, running)['builds']] == ['acting-job']
+    # Work the administrator did in the teacher's view stays out of the teacher's own view.
+    auth._exec('INSERT OR IGNORE INTO jobs(job_id,owner_id,course_id,created_at,actor_id) VALUES(?,?,?,?,?)', ('advisor-own', 2, 'y', time.time(), 2))
+    running['builds'].append({'id': 'advisor-own', 'course_name': 'His own upload', 'status': 'running'})
+    assert [b['id'] for b in respond(advisor, {'seg': 'course-builds'}, running)['builds']] == ['advisor-own']
+    assert [b['id'] for b in respond(acting, {'seg': 'course-builds'}, running)['builds']] == ['acting-job', 'advisor-own']
+    assert call(advisor, 'course-job-status', None, 'id=acting-job')[0]['status'] == 403
+    assert call(advisor, 'course-build-cancel', {'id': 'acting-job'})[0]['status'] == 403
+    assert call(acting, 'course-job-status', None, 'id=acting-job')[0] is None
+    assert call(advisor, 'course-job-status', None, 'id=advisor-own')[0] is None
     assert [b['id'] for b in respond(other, {'seg': 'course-builds'}, running)['builds']] == ['other-build']
     seen = respond(admin, {'seg': 'course-builds'}, running)['builds']
-    assert [b['id'] for b in seen] == ['acting-job', 'other-build', 'unknown-build'] and seen[0]['owner_name'] == 'Advisor'
+    assert [b['id'] for b in seen] == ['acting-job', 'other-build', 'unknown-build', 'advisor-own'] and seen[0]['owner_name'] == 'Advisor'
     assert call(student, 'course-builds')[0]['status'] == 403
     status, reply = api(admin_token, '/api/auth/act', {'user_id': None})
     assert status == 200 and reply['user']['id'] == 1 and reply['user']['is_admin']

@@ -144,6 +144,10 @@ def init():
             # The administrator can use the site as a chosen teacher (sessions.acting_as).
             if 'acting_as' not in [row[1] for row in c.execute('PRAGMA table_info(sessions)')]:
                 c.execute('ALTER TABLE sessions ADD COLUMN acting_as INTEGER')
+            # Who really started a build: work the administrator does in a teacher's view stays
+            # out of that teacher's own view of builds in progress.
+            if 'actor_id' not in [row[1] for row in c.execute('PRAGMA table_info(jobs)')]:
+                c.execute('ALTER TABLE jobs ADD COLUMN actor_id INTEGER')
             c.commit()
         finally:
             c.close()
@@ -555,8 +559,9 @@ def authorize(user, path, query, body, ctype):
                   (stage_id, user['id'], time.time()))
     if seg in ('course-job-status', 'course-build-cancel'):
         job_id = first('id') or first('job_id')
-        row = _one('SELECT owner_id FROM jobs WHERE job_id=?', (job_id,)) if job_id else None
-        if row and row['owner_id'] != user['id'] and not admin:
+        row = _one('SELECT owner_id, actor_id FROM jobs WHERE job_id=?', (job_id,)) if job_id else None
+        hidden = row and row['actor_id'] and row['actor_id'] != user['id'] and not user.get('acting_admin')
+        if row and (row['owner_id'] != user['id'] or hidden) and not admin:
             return _deny(403, 'job_forbidden', 'This course build belongs to another teacher.'), ctx
         if seg == 'course-build-cancel' and not row and not admin:
             return _deny(403, 'job_forbidden', 'Only the teacher who started this build can cancel it.'), ctx
@@ -594,13 +599,16 @@ def after_response(user, ctx, status, data, ctype):
             report['owner']=owners.get(report.get('stage_id'))
         return json.dumps(payload,ensure_ascii=False).encode('utf-8')
     if seg == 'course-builds':
-        # Builds in progress: a teacher sees their own (from any browser); the administrator sees all.
+        # Builds in progress: a teacher sees only the builds they started themselves (from any
+        # browser) - not the work the administrator does for them; the administrator sees all.
         admin = bool(user.get('is_admin'))
-        owners = {row['job_id']: row for row in _all('SELECT j.job_id, j.owner_id, u.name FROM jobs j LEFT JOIN users u ON u.id=j.owner_id')}
+        acting = bool(user.get('acting_admin'))
+        owners = {row['job_id']: row for row in _all('SELECT j.job_id, j.owner_id, j.actor_id, u.name FROM jobs j LEFT JOIN users u ON u.id=j.owner_id')}
         kept = []
         for build in payload.get('builds') or []:
             row = owners.get(str((build or {}).get('id') or ''))
-            if admin or (row and row['owner_id'] == user['id']):
+            mine = row and row['owner_id'] == user['id'] and (acting or not row['actor_id'] or row['actor_id'] == user['id'])
+            if admin or mine:
                 build = dict(build)
                 build['owned'] = bool(row and row['owner_id'] == user['id'])
                 if admin:
@@ -643,9 +651,10 @@ def after_response(user, ctx, status, data, ctype):
             cid = str(job.get('course_id') or ((job.get('result') or {}).get('course_id') if isinstance(job.get('result'), dict) else '') or '')
             jid = str(job.get('id') or '')
             owner = ctx.get('owner_id') or user['id']
+            actor = (user.get('acting_admin') or {}).get('id') or user['id']
             if jid:
-                _exec('INSERT OR IGNORE INTO jobs(job_id,owner_id,course_id,created_at) VALUES(?,?,?,?)',
-                      (jid, owner, cid, time.time()))
+                _exec('INSERT OR IGNORE INTO jobs(job_id,owner_id,course_id,created_at,actor_id) VALUES(?,?,?,?,?)',
+                      (jid, owner, cid, time.time(), actor))
                 row = _one('SELECT owner_id FROM jobs WHERE job_id=?', (jid,))
                 owner = row['owner_id'] if row else owner  # the teacher the build was started for
             if cid:
