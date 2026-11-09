@@ -1674,7 +1674,8 @@ class Handler(SharedAssetsMixin, SimpleHTTPRequestHandler):
             qs=parse_qs(urlparse(self.path).query);cid=str((qs.get('course_id') or qs.get('id') or [''])[0])
             man=COURSES.manifest(cid)
             if not man:self.send_json(404,{'error':'course not found'});return
-            self.send_json(200,{'ok':True,'manifest':man});return
+            COURSES.viewed(cid)
+            self.send_json(200,{'ok':True,'manifest':man,'activity':COURSES.activity(cid)});return
         if self.path.startswith('/api/reference/course-job-status'):
             from urllib.parse import urlparse,parse_qs
             qs=parse_qs(urlparse(self.path).query);jid=str((qs.get('id') or [''])[0]);job=COURSES.job_status(jid)

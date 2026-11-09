@@ -52,24 +52,69 @@ def background_check():
         check()
 
 
+_WAITERS = {}
+_WAITERS_LOCK = threading.Lock()
+
+
+def background_rank():
+    """This thread's place in the background queue (lower goes first), or None."""
+    rank = getattr(_LOCAL, 'background_rank', None)
+    try:
+        return tuple(rank()) if rank is not None else None
+    except Exception:
+        return (99,)
+
+
+class Waiting(object):
+    """A background model call waiting for its turn; the best-ranked waiter goes first."""
+    def __enter__(self):
+        self.key = object()
+        self.rank = getattr(_LOCAL, 'background_rank', None)
+        with _WAITERS_LOCK:
+            _WAITERS[self.key] = self.rank
+        return self
+
+    def __exit__(self, *args):
+        with _WAITERS_LOCK:
+            _WAITERS.pop(self.key, None)
+        return False
+
+    def first(self):
+        """True unless another waiting call in this process is ranked strictly better."""
+        with _WAITERS_LOCK:
+            waiting = list(_WAITERS.items())
+
+        def value(rank):
+            try:
+                return tuple(rank()) if rank is not None else (50,)
+            except Exception:
+                return (99,)
+        mine = value(self.rank)
+        return all(not value(rank) < mine for key, rank in waiting if key is not self.key)
+
+
 class BackgroundWork(object):
     """Mark this thread's model calls as low-priority, preemptible work.
 
     check() may raise (for example when the course was deleted) and is called
     while waiting for the model and while streaming.
     """
-    def __init__(self, check=None):
+    def __init__(self, check=None, rank=None):
         self.check = check
+        self.rank = rank  # callable: lower sorts first in the background queue
         self._previous = None
 
     def __enter__(self):
-        self._previous = (getattr(_LOCAL, 'background', False), getattr(_LOCAL, 'background_check', None))
+        self._previous = (getattr(_LOCAL, 'background', False), getattr(_LOCAL, 'background_check', None),
+                          getattr(_LOCAL, 'background_rank', None))
         _LOCAL.background = True
         _LOCAL.background_check = self.check
+        if self.rank is not None:
+            _LOCAL.background_rank = self.rank
         return self
 
     def __exit__(self, *args):
-        _LOCAL.background, _LOCAL.background_check = self._previous
+        _LOCAL.background, _LOCAL.background_check, _LOCAL.background_rank = self._previous
         return False
 
 

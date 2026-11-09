@@ -55,6 +55,7 @@ SOURCE_MAX_FINAL=max(2,min(5,int(os.environ.get('VQ_COURSE_SOURCE_MAX_FINAL','3'
 CONTEXT_BUDGET=max(4500,int(os.environ.get('VQ_COURSE_CONTEXT_CHARS','8500')))
 QUESTION_TARGET=100
 FIGURE_BATCH=10  # figure pages read before their passages are added to course Q&A
+VIEW_SECONDS=600  # a course whose page polled its status this recently counts as open (background priority)
 QUESTION_GENERATION='exam-mcq-v5'
 RERANK_BLEND=float(os.environ.get('VQ_COURSE_RERANK_BLEND','0.92'))
 MIN_SCOPE_SCORE=float(os.environ.get('VQ_COURSE_MIN_SCOPE_SCORE','0.26'))
@@ -743,7 +744,7 @@ def _lex_score(terms,value):
 class CourseManager(object):
     def __init__(self):
         self.build_slots=threading.Semaphore(1);self.jobs={};self.jobs_lock=threading.RLock();self.cache={};self.cache_lock=threading.Lock()
-        self.upload_lock=threading.RLock();self.manifest_lock=threading.RLock();self.scenario_lock=threading.RLock();self.quiz_result_lock=threading.RLock();self.running=set();self.deleted=set();self.running_lock=threading.Lock()
+        self.upload_lock=threading.RLock();self.manifest_lock=threading.RLock();self.scenario_lock=threading.RLock();self.quiz_result_lock=threading.RLock();self.running=set();self.deleted=set();self.running_lock=threading.Lock();self.views={};self.created={}
 
     def _stage_dir(self,stage_id):return STAGING_ROOT/_safe_id(stage_id)
     def _course_dir(self,course_id):return COURSE_ROOT/_safe_id(course_id)
@@ -1027,9 +1028,27 @@ class CourseManager(object):
     def _alive(self,cid):
         if cid in self.deleted:raise CourseDeleted('This course was deleted or its build was cancelled.')
 
-    def _background(self,cid):
-        """Course work yields the model to student questions and stops when the course is deleted."""
-        return BackgroundWork(lambda:self._alive(cid))
+    def _background(self,cid,kind='text'):
+        """Course work yields the model to student questions and stops when the course is deleted.
+
+        Courses take turns on the shared model by rank instead of all at once: a build (a
+        teacher is waiting for the course to open) first, then text preparation (lecture
+        scripts, questions, search), then image reading; within each, a course someone has
+        open goes first, then the newest course.
+        """
+        return BackgroundWork(lambda:self._alive(cid),rank=lambda:self._rank(cid,kind))
+
+    def viewed(self,cid):
+        """A teacher or student has this course open (its status is being read)."""
+        if cid:self.views[cid]=time.time()
+
+    def _rank(self,cid,kind):
+        tier={'build':0,'text':1,'image':2}.get(kind,1)
+        open_now=time.time()-self.views.get(cid,0)<VIEW_SECONDS
+        created=self.created.get(cid)
+        if created is None:
+            created=float((self.manifest(cid) or {}).get('created_at') or time.time());self.created[cid]=created
+        return (tier,0 if open_now else 1,-created)
 
     def _discard_deleted(self,cid):
         """Remove files a stopped worker may have written after deletion."""
@@ -1043,7 +1062,7 @@ class CourseManager(object):
         try:
             with self.build_slots:
                 if course_id in self.deleted:raise CourseDeleted('Build cancelled')
-                with self._background(course_id):
+                with self._background(course_id,'build'):
                     return self._build_impl(jid,stage,units,course_id,course_name,visual_model,model_key,model_call)
         finally:self._discard_deleted(course_id)
 
@@ -1180,7 +1199,7 @@ class CourseManager(object):
                 self.running.add(key)
             def work(task=key,task_fn=fn):
                 try:
-                    with self._background(cid):task_fn(cid,model_key,model_call)
+                    with self._background(cid,'image' if task[1]=='figures' else 'text'):task_fn(cid,model_key,model_call)
                 except CourseDeleted:pass
                 finally:
                     with self.running_lock:self.running.discard(task)
@@ -1216,7 +1235,8 @@ class CourseManager(object):
         self._update_manifest(cid,lambda m:m.setdefault('preparation',{}).update({'sources':{'status':'preparing','message':'Retrying source OCR from the saved original PDF','started_at':time.time()}}))
         def repair():
             try:
-                with self.build_slots,self._background(cid):self._repair_sources(cid)
+                # Not a build slot: a long re-read must not hold up other teachers' new courses.
+                with self._background(cid,'image'):self._repair_sources(cid)
             except CourseDeleted:return
             except Exception as error:
                 self._update_manifest(cid,lambda m:m['preparation']['sources'].update({'status':'error','error':str(error)[:400]}))
@@ -1608,6 +1628,13 @@ class CourseManager(object):
                 try:out.append(json.loads(mp.read_text(encoding='utf-8')))
                 except Exception:pass
         return out
+
+    def activity(self,cid=''):
+        """How much other courses are preparing on the shared model (counts only, no names)."""
+        with self.running_lock:running=set(self.running)
+        with self.jobs_lock:building=sum(1 for job in self.jobs.values() if job.get('status') in ('queued','running') and job.get('course_id')!=cid)
+        others=[item for item in running if item[0]!=cid]
+        return {'other_courses':len({item[0] for item in others}),'other_images':len({item[0] for item in others if item[1] in ('figures','sources')}),'other_builds':building}
 
     def course_summaries(self):
         return [{'course_id':m['course_id'],'course_name':m.get('course_name') or 'Uploaded Course','unit_count':len(m.get('units') or []),'created_at':m.get('created_at',0)} for m in self.list_courses()]

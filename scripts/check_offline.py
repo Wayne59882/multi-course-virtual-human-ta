@@ -87,6 +87,7 @@ def main():
         ("Login page show-password buttons", [node, str(TESTS / "test_login_page.cjs")]),
         ("Ollama cancellation", [sys.executable, str(TESTS / "test_ollama_cancel.py")]),
         ("Student priority, delete and cancel", [sys.executable, str(TESTS / "test_course_priority_delete.py")]),
+        ("Text before image reading", [sys.executable, str(TESTS / "test_image_priority.py")]),
         ("Answer job HTTP responses", [sys.executable, str(TESTS / "test_answer_jobs_http.py")]),
         ("Manual stop", [node, str(TESTS / "test_manual_stop.cjs"),
                          "web/shared/js/speech/recognition-controller.js"]),

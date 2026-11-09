@@ -3,13 +3,14 @@
 One GPU model runs at a time across the KB and Reference processes. Student
 answers have priority: while one waits, background course preparation does
 not start a new model call, and a running background stream is interrupted
-(see ollama_cancel.stream_chat_json) and retried afterwards.
+(see ollama_cancel.stream_chat_json) and retried afterwards. Background calls
+wait in rank order (ollama_cancel.BackgroundWork rank).
 """
 import os
 import threading
 import time
 from ollama_cancel import (current_scope, background_active, background_check,
-                           priority_waiting, PriorityClaim)
+                           priority_waiting, PriorityClaim, Waiting)
 try:
     import fcntl
 except ImportError:
@@ -64,12 +65,16 @@ class SharedModelLock:
                 claim.__exit__();raise
             self._claim=claim
             return self
-        while True:
-            while priority_waiting():
-                background_check();time.sleep(0.2)
-            self._acquire(None,True)
-            if not priority_waiting():return self
-            self._release();time.sleep(0.05)
+        # Background work takes turns by rank (see course_runtime: a course being viewed, then
+        # the newest course; builds, then text, then image reading), not all courses at once.
+        with Waiting() as turn:
+            blocked=lambda:priority_waiting() or not turn.first()
+            while True:
+                while blocked():
+                    background_check();time.sleep(0.2)
+                self._acquire(None,True)
+                if not blocked():return self
+                self._release();time.sleep(0.05)
 
     def __exit__(self,*args):
         claim=self._claim;self._claim=None

@@ -150,4 +150,8 @@ with tempfile.TemporaryDirectory() as temporary:
     roles = (ROOT / 'app/web/shared/js/auth/role-access.js').read_text(encoding='utf-8')
     assert 'c.owner_name&&!c.owned' in controller
     assert '/api/auth/admin/course-owner' in roles and "'/api/auth/act'" in roles and 'vqActBack' in roles
+    # Opening another teacher's course switches to that teacher's view with the course open,
+    # and the course's preparation has its own card (not the upload meters).
+    assert 'window.VQ_beforeCourseSwitch=cid=>' in roles and 'VQ_beforeCourseSwitch(cid))return;' in controller
+    assert 'function renderPrep(' in controller and 'v241MeterLectures' not in controller and 'id="v241Prep"' in controller
 print('[OK] administrator: sees, deletes, retries and reassigns every course, builds for a teacher, switches to a teacher\'s exact view and back; teachers and students stay isolated')

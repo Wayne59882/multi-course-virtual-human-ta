@@ -124,10 +124,15 @@ async function refreshPending(){
 
 // Administrator: use the site exactly as a chosen teacher sees it, and return.
 function forgetCourse(){try{['VQ_V241_ACTIVE_COURSE_ID','VQ_V241_PENDING_COURSE_STAGE'].forEach(k=>localStorage.removeItem(k));if(window.indexedDB)indexedDB.deleteDatabase('VQCourseUpload');}catch(_){}}
-async function actAs(id){
+async function actAs(id,cid){
   const r=await nativeFetch('/api/auth/act',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:id||null})}),d=await r.json().catch(()=>({}));
   if(!r.ok||!d.ok){window.alert(d.error||'無法切換。');return false;}
-  forgetCourse();location.reload();return true;
+  forgetCourse();try{if(cid)localStorage.setItem(ACTIVE_KEY,cid);}catch(_){}
+  location.reload();return true;
+}
+async function newestCourse(id){
+  try{const r=await nativeFetch('/api/reference/course-list',{cache:'no-store'}),d=await r.json();
+    return ((d.courses||[]).filter(c=>c.owner_id===id).sort((a,b)=>Number(b.created_at||0)-Number(a.created_at||0))[0]||{}).course_id||'';}catch(_){return '';}
 }
 async function fillTeachers(sel){
   try{const r=await nativeFetch('/api/auth/admin/users',{cache:'no-store'}),d=await r.json();
@@ -143,11 +148,11 @@ function userBar(){
   app.insertBefore(bar,app.firstChild);
   $('vqLogoutBtn').addEventListener('click',signOut);
   if($('vqPasswordBtn'))$('vqPasswordBtn').addEventListener('click',changePassword);
-  if(user.acting_admin){const back=$('vqActBack');back.addEventListener('click',async()=>{back.disabled=true;if(!await actAs(null))back.disabled=false;});}
+  if(user.acting_admin){const back=$('vqActBack');back.addEventListener('click',async()=>{back.disabled=true;let cid='';try{cid=localStorage.getItem(ACTIVE_KEY)||'';}catch(_){}if(!await actAs(null,cid))back.disabled=false;});}
   if(user.is_admin){
     $('vqAccountsBtn').addEventListener('click',accountsPanel);refreshPending();
     const pick=$('vqActAs');fillTeachers(pick);
-    pick.addEventListener('change',async()=>{const id=Number(pick.value);if(!id)return;pick.disabled=true;if(!await actAs(id)){pick.disabled=false;pick.value='';}});
+    pick.addEventListener('change',async()=>{const id=Number(pick.value);if(!id)return;pick.disabled=true;if(!await actAs(id,await newestCourse(id))){pick.disabled=false;pick.value='';}});
   }
 }
 
@@ -182,7 +187,11 @@ async function teacherBuilder(b){
     box.innerHTML='學生課程代碼 Course code：<b>'+esc(code)+'</b><button type="button">複製</button><span>學生登入後輸入此代碼即可使用這門課。</span>';
     box.querySelector('button').addEventListener('click',e=>{try{navigator.clipboard.writeText(code);e.target.textContent='已複製';}catch(_){}});};
   render();if(sel)sel.addEventListener('change',render);
-  if(user.is_admin)adminCourseTools(b,courses);
+  if(user.is_admin){
+    adminCourseTools(b,courses);
+    // Opening another teacher's course switches to that teacher's view with the course open.
+    window.VQ_beforeCourseSwitch=cid=>{const c=courses[cid];if(!c||!c.owner_id||c.owner_id===user.id)return false;actAs(c.owner_id,cid);return true;};
+  }
 }
 
 // Administrator: move a saved course to another teacher.
