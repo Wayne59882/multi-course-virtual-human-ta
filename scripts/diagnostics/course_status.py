@@ -87,11 +87,17 @@ for manifest_path in sorted(COURSES.glob('*/course_manifest.json'), key=lambda p
         print('  figure pages read so far:', len(figures))
 
 print('\n--- processes ---')
-print(run(['bash', '-c', "ps -eo pid,etime,pcpu,rss,args | grep -E 'reference_server|gateway.py|kb_server|ollama|whisper' | grep -v grep | cut -c1-160"]))
-print('\n--- ollama ps ---')
-print(run(['bash', '-c', 'ollama ps 2>&1 || curl -s --max-time 5 http://127.0.0.1:11434/api/ps']))
+print(run(['bash', '-c', "ps -eo pid,user,etime,pcpu,rss,args | grep -E 'reference_server|gateway.py|kb_server|ollama|llama-server|whisper' | grep -v -E 'grep|bash -c' | cut -c1-170"]))
+print('\n--- models loaded (PROCESSOR shows GPU vs CPU share; anything on CPU is many times slower) ---')
+for host in ('127.0.0.1:11435', '127.0.0.1:11434'):
+    binary = '/work103/wayne6/ollama/bin/ollama' if Path('/work103/wayne6/ollama/bin/ollama').exists() else 'ollama'
+    print('[%s]' % host)
+    print(run(['bash', '-c', 'OLLAMA_HOST=%s %s ps 2>&1 | head -6' % (host, binary)]))
 print('\n--- GPU ---')
 print(run(['bash', '-c', 'nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total --format=csv,noheader 2>&1 | head -4']))
+print(run(['bash', '-c', 'nvidia-smi --query-compute-apps=pid,used_memory,process_name --format=csv,noheader 2>&1 | head -12']))
+print('\n--- OCR (Tesseract) ---')
+print(run(['bash', '-c', 'command -v tesseract >/dev/null && { tesseract --version 2>&1 | head -1; tesseract --list-langs 2>&1 | tail -n +2 | tr "\\n" " "; } || echo "tesseract NOT installed: pages without a text layer must be read by the vision model"']))
 print('\n--- recent reference_server errors ---')
 for row in tail(APP / 'logs' / 'reference_server_sync.log', 30, ('Error', 'Traceback', 'error', 'Exception', 'preempt', 'Killed')):
     print(row[:220])

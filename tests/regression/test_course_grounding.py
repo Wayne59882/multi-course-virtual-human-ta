@@ -72,4 +72,21 @@ try:
             assert response.status==200 and data['engine']=='course-scope-rejected',data
     assert fake.requested==['biology-only','biology-only']
 finally:http.shutdown();http.server_close();thread.join()
-print('PASS six-subject exact-quote reviews, unsupported/outside-task/missing-coverage rejection, actual local API refusing supplied-context scope bypass')
+from course_grounding import quote_found
+# Quotes the local model copies with harmless differences are accepted; changed facts are not.
+_source=("Pharmacokinetics describes how the body absorbs, distributes, metabolises and excretes a drug.\n"
+         "The first-pass effect reduces the bioavailability of many oral drugs to less than 50 per cent.\n"
+         "Beta blockers do not cause bronchodilation; they may cause bronch-\nospasm in asthmatic patients. Di\ufb00usion is passive.")
+for _quote,_ok in [
+        ("\u201cpharmacokinetics describes how the body absorbs, distributes, metabolises and excretes a drug\u201d",True),
+        ("Pharmacokinetics describes how the body absorbs ... excretes a drug.",True),
+        ("they may cause bronchospasm in asthmatic patients",True),
+        ("Diffusion is passive.",True),
+        ("The first pass effect lowers the bioavailability of many oral drugs to less than 50 per cent.",True),
+        ("The first-pass effect reduces the bioavailability of many oral drugs to less than 60 per cent.",False),
+        ("Beta blockers cause bronchodilation; they may cause bronchospasm in asthmatic patients.",False),
+        ("Beta blockers do ... cause bronchodilation; they may",False),
+        ("Pharmacokinetics describes how ... cause bronchodilation they may",False),
+        ("Antibiotics kill bacteria by inhibiting cell wall synthesis in most cases.",False)]:
+    assert quote_found(_quote,_source)==_ok,(_quote,_ok)
+print('PASS six-subject exact-quote reviews, tolerant-but-strict quote matching (numbers/negations), unsupported/outside-task/missing-coverage rejection, actual local API refusing supplied-context scope bypass')
