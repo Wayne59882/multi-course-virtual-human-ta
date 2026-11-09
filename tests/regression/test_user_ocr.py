@@ -31,6 +31,24 @@ with tempfile.TemporaryDirectory() as temporary:
         assert engine.executable == str(fake) and seen.read_text() == str(folder / 'tessdata')
         # Also on the command line, because a packaged Tesseract may set its own TESSDATA_PREFIX.
         assert '--tessdata-dir ' + str(folder / 'tessdata') in args.read_text(), args.read_text()
+        # The server's older PyMuPDF has getPixmap/getPNGData only (no get_pixmap, save or tobytes).
+        class OldPixmap:
+            def getPNGData(self):
+                return b'\x89PNG fixture'
+
+        class OldPage:
+            rect = type('Rect', (), {'width': 612.0, 'height': 792.0})()
+
+            def getPixmap(self, **options):
+                return OldPixmap()
+        written = []
+
+        def fake_run(command, **options):
+            written.append(Path(command[1]).read_bytes())
+            return subprocess.CompletedProcess(command, 0, b'level\tconf\ttext\n', b'')
+        with patch.object(pdf_ocr.subprocess, 'run', fake_run), patch.object(pdf_ocr, 'parse_tsv', lambda text: {'ok': True}):
+            assert engine.read(OldPage()) == {'ok': True}, engine.read(OldPage())
+        assert written and written[0].startswith(b'\x89PNG')
         # Nothing recorded and nothing on the PATH: reported as missing, as before.
         record.unlink()
         assert not pdf_ocr.LocalOCR().report()['available']
@@ -43,6 +61,7 @@ with tempfile.TemporaryDirectory() as temporary:
     # reuses an unpacked Tesseract instead of downloading it again.
     for source in ('raw.githubusercontent.com', 'cdn.jsdelivr.net', 'registry.npmjs.org/@tesseract.js-data', 'micro.mamba.pm'):
         assert source in text, source
+    assert "document.newPage" in text and "page.insertText" in text
     assert 'squashfs-root/AppRun" ]; then' in text and '--tessdata-dir "$TESSDATA" --list-langs' in text
     # TSV output does not depend on a configs/ folder next to separately downloaded languages.
     assert "'tessedit_create_tsv=1'" in (APP / 'pdf_ocr.py').read_text(encoding='utf-8')

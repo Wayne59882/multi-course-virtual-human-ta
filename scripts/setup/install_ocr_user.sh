@@ -131,10 +131,11 @@ report = engine.report()
 if not report.get('available'):
     print('NOT available: ' + str(report))
 else:
-    try:  # read one generated page, the same way uploaded pages are read
+    try:  # read one generated page, the same way uploaded pages are read (old and new PyMuPDF names)
         import fitz
-        page = fitz.open().new_page()
-        page.insert_text((40, 80), 'Southern blot detects DNA fragments', fontsize=20)
+        document = fitz.open()
+        page = (getattr(document, 'new_page', None) or document.newPage)()
+        (getattr(page, 'insert_text', None) or page.insertText)((40, 80), 'Southern blot detects DNA fragments', fontsize=20)
         result = engine.read(page)
         readable = result.get('words', 0) >= 3 or 'Southern' in str(result.get('text', ''))
         print('available' if readable else 'NOT available: test page unreadable ' + str(result)[:300])
@@ -146,5 +147,5 @@ PY
 say "網站的 OCR 狀態：$REPORT"
 case "$REPORT" in
   available) say "[DONE] OCR 已安裝完成。之後上傳的 PDF，沒有文字的頁面會先用 OCR（每頁幾秒）。" ;;
-  *) say "[NOTE] Tesseract 已裝好，但網站還沒有偵測到；若網站程式還沒更新到最新版，等 5 分鐘後再執行一次這個指令。" ;;
+  *) say "[NOTE] Tesseract 已裝好，但網站的測試沒有通過（網站程式若剛更新，等 5 分鐘再執行一次）；仍失敗請把上面全部的訊息貼給 Claude。" ;;
 esac

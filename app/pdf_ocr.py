@@ -75,7 +75,9 @@ class LocalOCR:
             getter=getattr(page,'get_pixmap',None) or getattr(page,'getPixmap')
             pixmap=getter(matrix=fitz.Matrix(scale,scale),alpha=False,colorspace=fitz.csRGB)
             with tempfile.TemporaryDirectory(prefix='course-ocr-') as temporary:
-                image=Path(temporary)/'page.png';pixmap.save(str(image));del pixmap
+                # PNG bytes through either PyMuPDF name: the server's older release has getPNGData, not save/tobytes.
+                encoder=getattr(pixmap,'tobytes',None) or getattr(pixmap,'getPNGData')
+                image=Path(temporary)/'page.png';image.write_bytes(encoder());del pixmap
                 env=self._env();env['OMP_THREAD_LIMIT']='1'
                 # TSV is requested as a setting, not the 'tsv' config file, which a separately
                 # downloaded language folder does not include.
