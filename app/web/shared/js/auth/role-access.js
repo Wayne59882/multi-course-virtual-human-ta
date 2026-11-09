@@ -32,6 +32,8 @@ body:not(.vq-role-teacher):not(.vq-role-student) #v241CourseBuilder{visibility:h
 .vq-userbar .vq-role{font-weight:800;border-radius:999px;padding:3px 9px;font-size:12px}
 .vq-role-teacher .vq-userbar .vq-role{background:#e0f2ef;color:#0f5e57}.vq-role-student .vq-userbar .vq-role{background:#e3effa;color:#185a91}
 .vq-userbar button{font:inherit;font-size:12.5px!important;font-weight:700!important;border:1px solid #c8d9ec!important;background:#fff;color:#174d7f;border-radius:999px!important;padding:6px 12px!important;box-shadow:none!important;cursor:pointer}
+.vq-userbar select{font:inherit;font-size:12.5px!important;font-weight:700!important;border:1px solid #c8d9ec!important;background:#fff;color:#174d7f;border-radius:999px!important;padding:6px 10px!important;width:auto!important;min-height:0!important;height:auto!important;max-width:220px;box-shadow:none!important;cursor:pointer}
+.vq-userbar .vq-acting{background:#fff3d6;color:#7a4b00;border:1px solid #f0d9a4;border-radius:999px;padding:5px 12px;font-weight:700}
 .vq-userbar button:hover{background:#f1f7fd}.vq-userbar .vq-badge{display:inline-block;min-width:18px;padding:0 5px;margin-left:5px;border-radius:9px;background:#d9534f;color:#fff;font-size:11px;line-height:18px;text-align:center}
 .vq-role-student #v241CourseBuilder .v241-grid,.vq-role-student #v241InspectBtn,.vq-role-student #v241BuildBtn,.vq-role-student #v241RetryPrep,
 .vq-role-student #v241WorkProgress,.vq-role-student #v241UnitWrap,.vq-role-student #v241DeleteCourse,.vq-role-student #v241ExpandQuiz,
@@ -120,15 +122,33 @@ async function refreshPending(){
     b.innerHTML='帳號審核'+(n?'<span class="vq-badge">'+n+'</span>':'');}catch(_){}
 }
 
+// Administrator: use the site exactly as a chosen teacher sees it, and return.
+function forgetCourse(){try{['VQ_V241_ACTIVE_COURSE_ID','VQ_V241_PENDING_COURSE_STAGE'].forEach(k=>localStorage.removeItem(k));if(window.indexedDB)indexedDB.deleteDatabase('VQCourseUpload');}catch(_){}}
+async function actAs(id){
+  const r=await nativeFetch('/api/auth/act',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:id||null})}),d=await r.json().catch(()=>({}));
+  if(!r.ok||!d.ok){window.alert(d.error||'無法切換。');return false;}
+  forgetCourse();location.reload();return true;
+}
+async function fillTeachers(sel){
+  try{const r=await nativeFetch('/api/auth/admin/users',{cache:'no-store'}),d=await r.json();
+    sel.innerHTML='<option value="">切換老師</option>'+(d.users||[]).filter(u=>u.status==='approved'&&u.role==='teacher'&&!u.is_admin).map(u=>`<option value="${u.id}">${esc(u.name)}</option>`).join('');}catch(_){}
+}
 function userBar(){
   const app=document.querySelector('.app');if(!app||$('vqUserBar'))return;
   const bar=document.createElement('div');bar.id='vqUserBar';bar.className='vq-userbar';
-  bar.innerHTML=`<span class="vq-who"><span>${esc(user.name)}</span><span class="vq-role">${esc(ROLE[user.role]||user.role)}</span></span>`+
-    (user.is_admin?'<button type="button" id="vqAccountsBtn">帳號審核</button>':'')+
-    '<button type="button" id="vqPasswordBtn">修改密碼</button><button type="button" id="vqLogoutBtn">登出 Sign out</button>';
+  bar.innerHTML=(user.acting_admin?`<span class="vq-acting">管理員以 ${esc(user.name)} 的身分操作中</span><button type="button" id="vqActBack">回到管理員</button>`:'')+
+    `<span class="vq-who"><span>${esc(user.name)}</span><span class="vq-role">${esc(ROLE[user.role]||user.role)}</span></span>`+
+    (user.is_admin?'<select id="vqActAs" aria-label="切換老師"><option value="">切換老師</option></select><button type="button" id="vqAccountsBtn">帳號審核</button>':'')+
+    (user.acting_admin?'':'<button type="button" id="vqPasswordBtn">修改密碼</button>')+'<button type="button" id="vqLogoutBtn">登出 Sign out</button>';
   app.insertBefore(bar,app.firstChild);
-  $('vqLogoutBtn').addEventListener('click',signOut);$('vqPasswordBtn').addEventListener('click',changePassword);
-  if(user.is_admin){$('vqAccountsBtn').addEventListener('click',accountsPanel);refreshPending();}
+  $('vqLogoutBtn').addEventListener('click',signOut);
+  if($('vqPasswordBtn'))$('vqPasswordBtn').addEventListener('click',changePassword);
+  if(user.acting_admin){const back=$('vqActBack');back.addEventListener('click',async()=>{back.disabled=true;if(!await actAs(null))back.disabled=false;});}
+  if(user.is_admin){
+    $('vqAccountsBtn').addEventListener('click',accountsPanel);refreshPending();
+    const pick=$('vqActAs');fillTeachers(pick);
+    pick.addEventListener('change',async()=>{const id=Number(pick.value);if(!id)return;pick.disabled=true;if(!await actAs(id)){pick.disabled=false;pick.value='';}});
+  }
 }
 
 function studentBuilder(b){
@@ -152,7 +172,7 @@ function studentBuilder(b){
 
 async function teacherBuilder(b){
   const sub=b.querySelector('.v241-active+.v241-sub');
-  if(sub)sub.textContent=user.is_admin?'管理員可管理所有老師的課程：刪除、代老師上傳、轉移擁有者。選擇課程後把課程代碼提供給學生。內建課程不能刪除。':'只有您看得到自己上傳的課程；其他老師看不到。選擇課程後把課程代碼提供給學生，學生輸入代碼即可使用該課程。內建課程不能刪除。';
+  if(sub)sub.textContent=user.is_admin?'管理員看得到並可刪除所有老師的課程，也可轉移擁有者。要用某位老師的畫面操作（例如代老師上傳），請按右上角「切換老師」。內建課程不能刪除。':'只有您看得到自己上傳的課程；其他老師看不到。選擇課程後把課程代碼提供給學生，學生輸入代碼即可使用該課程。內建課程不能刪除。';
   let codes={},courses={};
   try{const r=await nativeFetch('/api/reference/course-list',{cache:'no-store'}),d=await r.json();(d.courses||[]).forEach(c=>{courses[c.course_id]=c;if(c.access_code)codes[c.course_id]=c.access_code;});}catch(_){}
   const sel=$('v241ExistingCourses');
@@ -165,14 +185,12 @@ async function teacherBuilder(b){
   if(user.is_admin)adminCourseTools(b,courses);
 }
 
-// Administrator: build a course for another teacher, and move a saved course to another teacher.
+// Administrator: move a saved course to another teacher.
 async function adminCourseTools(b,courses){
   let people=[];
   try{const r=await nativeFetch('/api/auth/admin/users',{cache:'no-store'}),d=await r.json();people=(d.users||[]).filter(u=>u.status==='approved'&&(u.role==='teacher'||u.is_admin));}catch(_){}
   if(!people.length)return;
   const options=pick=>people.map(u=>`<option value="${u.id}"${u.id===pick?' selected':''}>${esc(u.name)} · ${esc(u.email)}</option>`).join('');
-  const grid=b.querySelector('.v241-grid');
-  if(grid&&!$('vqBuildOwner')){const f=document.createElement('div');f.className='v241-field';f.innerHTML='<label for="vqBuildOwner">Course Owner</label><select id="vqBuildOwner">'+options(user.id)+'</select>';grid.appendChild(f);}
   const sel=$('v241ExistingCourses');
   const render=()=>{let box=$('vqCourseOwner');const c=courses[sel&&sel.value];
     if(!c){if(box)box.remove();return;}

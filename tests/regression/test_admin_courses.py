@@ -1,5 +1,6 @@
 """The administrator manages every teacher's courses; teachers still see only their own.
 Exercises the account gate directly with a throw-away account database (no server)."""
+import io
 import json
 import os
 from pathlib import Path
@@ -91,9 +92,62 @@ with tempfile.TemporaryDirectory() as temporary:
     respond(admin, {'seg': 'course-delete', 'course_id': 'genomic-1'}, {'ok': True})
     assert auth.course_owner('genomic-1') is None
 
-    # The page sends the chosen owner and shows it in the course list.
+    # Switching teacher: the administrator's session uses the site exactly as that teacher.
+    class Request:
+        def __init__(self, token, body=None):
+            data = json.dumps(body).encode() if body is not None else b''
+            self.headers = {'Cookie': '%s=%s' % (auth.COOKIE, token), 'Content-Length': str(len(data))}
+            self.rfile, self.wfile, self.status = io.BytesIO(data), io.BytesIO(), None
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, *header):
+            pass
+
+        def end_headers(self):
+            pass
+
+        def reply(self):
+            return json.loads(self.wfile.getvalue().decode('utf-8'))
+
+    def api(token, path, body=None, method='POST'):
+        request = Request(token, body)
+        auth.handle(request, method, path, '')
+        return request.status, request.reply()
+
+    admin_token, advisor_token = auth.create_session(1), auth.create_session(2)
+    assert auth.user_from_request(Request(admin_token))['is_admin']
+    status, reply = api(admin_token, '/api/auth/act', {'user_id': 2})
+    assert status == 200 and reply['user']['id'] == 2 and reply['user']['acting_admin']['id'] == 1, reply
+    acting = auth.user_from_request(Request(admin_token))
+    assert acting['id'] == 2 and acting['role'] == 'teacher' and not acting['is_admin']
+    assert auth.user_from_request(Request(admin_token), act=False)['id'] == 1
+    # Exactly the teacher's view: only the teacher's courses, and no administrator powers.
+    shown = respond(acting, {'seg': 'course-list'}, listing)['courses']
+    assert all(auth.course_owner(c['course_id']) == 2 for c in shown) and 'owner_email' not in json.dumps(shown)
+    assert call(acting, 'course-delete', {'course_id': 'other-2'})[0]['status'] == 403
+    assert api(admin_token, '/api/auth/admin/users', method='GET')[0] == 403
+    # Uploads and builds made in the teacher's view belong to the teacher.
+    denial, ctx = call(acting, 'course-build', {'stage_id': 'acting-stage'})
+    assert denial is None
+    respond(acting, ctx, {'ok': True, 'job': {'id': 'acting-job', 'course_id': 'genomic-3'}})
+    assert auth.course_owner('genomic-3') == 2
+    # The teacher's password cannot be changed from the administrator's session.
+    assert api(admin_token, '/api/auth/password', {'old_password': 'x', 'new_password': 'y' * 10})[0] == 403
+    # The teacher's own session is unaffected; only the administrator can switch.
+    assert auth.user_from_request(Request(advisor_token)).get('acting_admin') is None
+    assert api(advisor_token, '/api/auth/act', {'user_id': 3})[0] == 403
+    # Students, accounts not yet approved and the administrator are not choices.
+    for bad in (4, 5, 1):
+        assert api(admin_token, '/api/auth/act', {'user_id': bad})[0] == 400, bad
+    status, reply = api(admin_token, '/api/auth/act', {'user_id': None})
+    assert status == 200 and reply['user']['id'] == 1 and reply['user']['is_admin']
+    assert auth.user_from_request(Request(admin_token))['is_admin']
+
+    # The page: owners in the course list, owner transfer, and the teacher switcher.
     controller = (ROOT / 'app/web/shared/js/course/course-controller.js').read_text(encoding='utf-8')
     roles = (ROOT / 'app/web/shared/js/auth/role-access.js').read_text(encoding='utf-8')
-    assert "body.owner_id=Number(owner.value)" in controller and 'c.owner_name&&!c.owned' in controller
-    assert '/api/auth/admin/course-owner' in roles and 'vqBuildOwner' in roles
-print('[OK] administrator: sees, deletes, retries and reassigns every course, builds for a teacher; teachers and students stay isolated')
+    assert 'c.owner_name&&!c.owned' in controller
+    assert '/api/auth/admin/course-owner' in roles and "'/api/auth/act'" in roles and 'vqActBack' in roles
+print('[OK] administrator: sees, deletes, retries and reassigns every course, builds for a teacher, switches to a teacher\'s exact view and back; teachers and students stay isolated')

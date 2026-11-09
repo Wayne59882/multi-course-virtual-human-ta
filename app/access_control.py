@@ -141,6 +141,9 @@ def init():
         c = _connect()
         try:
             c.executescript(SCHEMA)
+            # The administrator can use the site as a chosen teacher (sessions.acting_as).
+            if 'acting_as' not in [row[1] for row in c.execute('PRAGMA table_info(sessions)')]:
+                c.execute('ALTER TABLE sessions ADD COLUMN acting_as INTEGER')
             c.commit()
         finally:
             c.close()
@@ -240,13 +243,22 @@ def _session_token(handler):
     return m.group(1) if m else ''
 
 
-def user_from_request(handler):
+def user_from_request(handler, act=True):
+    """The signed-in user.  While the administrator uses the site as a teacher, that teacher
+    (with acting_admin set) unless act=False asks for the administrator."""
     token = _session_token(handler)
     if not token:
         return None
-    row = _one('SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id '
+    row = _one('SELECT u.*, s.acting_as AS acting_as FROM sessions s JOIN users u ON u.id=s.user_id '
                'WHERE s.token=? AND s.expires_at>? AND u.status=?', (_th(token), time.time(), 'approved'))
-    return public_user(row)
+    user = public_user(row)
+    if act and user and user['is_admin'] and row['acting_as']:
+        target = teacher_account(row['acting_as'])
+        if target and target['id'] != user['id']:
+            acted = public_user(target)
+            acted['acting_admin'] = {'id': user['id'], 'name': user['name']}
+            return acted
+    return user
 
 
 def create_session(user_id):
@@ -842,7 +854,23 @@ def handle(handler, method, path, query):
         if not user:
             return _reply(handler, 401, {'ok': False, 'code': 'login_required', 'error': 'Please sign in.'})
 
+        if path == '/api/auth/act' and method == 'POST':
+            # Administrator: use the site as a teacher (user_id), or return to the administrator (null).
+            real = user_from_request(handler, act=False)
+            if not real or not real['is_admin']:
+                return _reply(handler, 403, {'ok': False, 'code': 'admin_only', 'error': '只有管理員可以使用。'})
+            target_id = _body_json(handler).get('user_id')
+            target = teacher_account(target_id) if target_id not in (None, '', 0) else None
+            if target_id not in (None, '', 0) and (not target or target['id'] == real['id']):
+                return _reply(handler, 400, {'ok': False, 'error': '請選擇已核准的老師。'})
+            token = _th(_session_token(handler))
+            _exec('UPDATE sessions SET acting_as=? WHERE token=?', (target['id'] if target else None, token))
+            _log('administrator %s %s' % (real['email'], ('now acting as ' + target['email']) if target else 'returned to the administrator view'))
+            return _reply(handler, 200, {'ok': True, 'user': user_from_request(handler)})
+
         if path == '/api/auth/password' and method == 'POST':
+            if user.get('acting_admin'):
+                return _reply(handler, 403, {'ok': False, 'code': 'acting', 'error': '請先回到管理員身分再修改密碼。'})
             d = _body_json(handler)
             row = user_by_id(user['id'])
             new = str(d.get('new_password') or '')

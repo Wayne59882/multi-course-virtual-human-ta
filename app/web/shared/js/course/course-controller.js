@@ -103,7 +103,6 @@ async function buildCourse(){
   if(!inspection){setBuildStatus('Inspect the uploaded PDFs first.','error');return;}const units=selectedUnits();if(!units.length){setBuildStatus('Select at least one chapter/unit.','error');return;}const problem=unitProblem(units);if(problem){setBuildStatus(problem,'error');return;}
   const full=$('v241FullReading');
   const body={stage_id:inspection.stage_id,course_name:String($('v241CourseName').value||'').trim(),units,model_key:modelKey(),reading:full&&full.checked?'inline':'fast'};
-  const owner=$('vqBuildOwner');if(owner&&owner.value)body.owner_id=Number(owner.value);
   $('v241BuildBtn').disabled=true;setMeter('Activate',0,'Extracting course material');setBuildStatus('Extracting selected units for course Q&A. You may refresh; the server continues the build.');
   try{
     if(draft){draft.phase='building';draft.buildBody=body;await saveDraft();setPending(draft.stageId);}
