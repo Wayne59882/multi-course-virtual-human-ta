@@ -285,6 +285,31 @@ def health(services=None):
         time.sleep(.5)
     raise RuntimeError('Readiness checks failed: '+'; '.join(name+' '+reason for name,reason in errors.items()))
 
+MAX_BUILD_DEFER=3*3600  # an update waits at most this long for a running course build
+
+
+def running_build(target,now=None):
+    """Name of a course build in progress (updated in the last 15 minutes), or ''."""
+    now=now or time.time()
+    for path in sorted((target/'course_workspaces'/'_jobs').glob('*.json')):
+        try:job=json.loads(path.read_text(encoding='utf-8'))
+        except (OSError,ValueError):continue
+        if job.get('status') in ('queued','running') and now-float(job.get('updated_at') or 0)<900:
+            return str(job.get('course_name') or job.get('id') or 'a course')
+    return ''
+
+
+def defer_update(previous,busy,now=None):
+    """An update restarts the server; wait while a course build is reading pages (at most
+    MAX_BUILD_DEFER), so the page being read is not lost. Returns True to wait this round."""
+    now=now or time.time()
+    if not busy:return False
+    since=float(previous.get('deferred_since') or 0) or now
+    if now-since>=MAX_BUILD_DEFER:return False
+    previous['deferred_since']=since
+    return True
+
+
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--target',required=True);parser.add_argument('--apply',action='store_true');parser.add_argument('--publish',action='store_true')
     args=parser.parse_args();target=Path(args.target).resolve()
@@ -307,6 +332,10 @@ def main():
             print('Already synchronized: '+sha);return
         if not ci_passed(sha):print('Waiting for successful Offline checks on '+sha);return
         if not args.apply:print('CI-approved update available: '+sha);return
+        busy=running_build(target)
+        if defer_update(previous,busy):
+            state.write_text(json.dumps(previous))
+            print('Update waits: a course build is in progress (%s); it installs when the build finishes (at most %d h).'%(busy,MAX_BUILD_DEFER//3600));return
         run(['git','merge','--ff-only','origin/main'])
         if run(['git','rev-parse','HEAD'])!=sha:raise RuntimeError('Source has local commits beyond CI-approved main; no files changed')
         services=plan_services(target)

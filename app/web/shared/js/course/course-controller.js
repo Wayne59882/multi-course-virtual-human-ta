@@ -43,7 +43,7 @@ function injectBuilder(){
   <div class="v241-actions"><button type="button" class="v241-primary" id="v241InspectBtn">Upload &amp; Inspect Course Materials</button><button type="button" id="v241BuildBtn" disabled>Build Teaching Assistant</button><button type="button" id="v241RetryPrep" hidden>Retry Background Preparation</button><button type="button" id="v241CancelBuild" hidden>Cancel Build</button></div>
   <div class="v241-status" id="v241BuildStatus" role="status" aria-live="polite">Select searchable PDFs, inspect the teaching units, then build. Course Q&amp;A opens after extraction; reviewed exam-style questions become playable as soon as two per unit are ready.</div>
   <div class="v241-meters" id="v241WorkProgress" hidden><div id="v241MeterUpload" hidden><span>PDF upload</span><span id="v241LabelUpload"></span><progress id="v241BarUpload" max="100" value="0"></progress></div><div id="v241MeterActivate" hidden><span>Course activation</span><span id="v241LabelActivate"></span><progress id="v241BarActivate" max="100" value="0"></progress></div></div>
-  <div class="v241-unit-wrap" id="v241UnitWrap" hidden><div class="v241-unit-title">Teaching units found — check each name and page range before building</div><div class="v241-unit-hint">✎ Click a unit name or page number to correct it. Untick units you do not need.</div><label class="v241-reading"><input type="checkbox" id="v241FullReading"> Read every slide image before the course opens (much slower). By default the course opens after the text is read, and images are read in the background.</label><div class="v241-unit-toolbar"><div class="v241-unit-summary" id="v241UnitSummary"></div><div class="v241-unit-buttons"><button type="button" id="v241SelectAll">Select all</button><button type="button" id="v241ClearAll">Clear all</button></div></div><div class="v241-unit-list" id="v241UnitList"></div></div>
+  <div class="v241-unit-wrap" id="v241UnitWrap" hidden><div class="v241-unit-title">Teaching units found — check each name and page range before building</div><div class="v241-unit-hint">✎ Click a unit name or page number to correct it. Untick units you do not need.</div><div class="v241-unit-toolbar"><div class="v241-unit-summary" id="v241UnitSummary"></div><div class="v241-unit-buttons"><button type="button" id="v241SelectAll">Select all</button><button type="button" id="v241ClearAll">Clear all</button></div></div><div class="v241-unit-list" id="v241UnitList"></div></div>
   <div class="v241-builds" id="v241Builds" hidden></div>
   <div class="v241-active"><div class="v241-field"><label for="v241ExistingCourses">Currently teaching</label><select class="v241-active-select" id="v241ExistingCourses"><option value="">Built-in Physiology (default)</option></select></div><div class="v241-actions" style="margin:0"><button type="button" id="v241DeleteCourse" disabled>Delete selected course</button></div></div><div class="v241-prep" id="v241Prep" hidden></div><div class="v241-sub">Select a saved course to teach or delete it when it is no longer needed. The built-in course cannot be deleted.</div>`;
   title.insertAdjacentElement('afterend',wrap);
@@ -67,13 +67,26 @@ async function inspectCourse(){
     await saveDraft();setPending(draft.stageId);await resumeUpload();
   }catch(e){setBuildStatus('Upload paused: '+String(e&&e.message||e)+'. Refresh to resume, or select the PDFs again.','error');btn.disabled=false;}
 }
+const RESTARTING=[0,502,503,504,520,521,522,523,524,525,526,527,530];
+async function getJSON(url,doing){
+  // An update restarts the server for a minute or two: keep retrying instead of stopping.
+  const started=Date.now();let wait=2000;
+  for(;;){
+    let r=null,d=null;
+    try{r=await fetch(url,{cache:'no-store'});d=await r.json();}catch(_){d=null;}
+    if(r&&d&&!RESTARTING.includes(r.status))return {r,d};
+    if(Date.now()-started>15*60*1000)throw new Error('The server did not answer for 15 minutes. Refresh to retry; nothing is lost.');
+    if(doing)setBuildStatus(doing+' — the server is restarting (an update); continuing automatically…');
+    await new Promise(res=>setTimeout(res,wait));wait=Math.min(15000,wait*1.6);
+  }
+}
 async function waitForInspection(base,i,count){
   // Reading the outline of a long PDF can take minutes; the server does it in the background.
   const started=Date.now();
   for(;;){
     const seconds=Math.round((Date.now()-started)/1000);
     setMeter('Upload',100,'Inspecting teaching units… '+seconds+' s');setBuildStatus('PDF '+(i+1)+' / '+count+' received. Finding the teaching units… ('+seconds+' s). You may refresh; this continues on the server.');
-    const r=await fetch(base,{cache:'no-store'}),d=await r.json().catch(()=>({}));
+    const {r,d}=await getJSON(base,'Finding the teaching units');
     if(!r.ok||!d.ok)throw new Error(d.error||('HTTP '+r.status));
     if(d.complete)return d.inspection||null;
     if(Date.now()-started>30*60*1000)throw new Error('Inspection is taking more than 30 minutes. Refresh to keep waiting.');
@@ -86,15 +99,22 @@ async function resumeUpload(){
     const allBytes=draft.files.reduce((sum,x)=>sum+x.file.size,0);let previousBytes=draft.files.slice(0,draft.nextIndex).reduce((sum,x)=>sum+x.file.size,0);
     for(let i=draft.nextIndex;i<draft.files.length;i++){
       const item=draft.files[i],file=item.file,base='/api/reference/course-upload-status?stage_id='+encodeURIComponent(draft.stageId)+'&upload_id='+encodeURIComponent(item.id);
-      const s=await fetch(base,{cache:'no-store'}),state=await s.json();if(!s.ok||!state.ok)throw new Error(state.error||'Upload status unavailable');let offset=Number(state.offset||0);
+      const {r:s,d:state}=await getJSON(base,'Uploading');if(!s.ok||!state.ok)throw new Error(state.error||'Upload status unavailable');let offset=Number(state.offset||0),failures=0;
       setMeter('Upload',100*(previousBytes+offset)/allBytes,Math.round(100*(previousBytes+offset)/allBytes)+'% · '+(i+1)+' / '+draft.files.length+' PDFs');
       if(!state.complete&&offset===file.size)state.inspection=await waitForInspection(base,i,draft.files.length);
       if(state.complete||(offset===file.size&&state.inspection)){inspection=state.inspection;draft.nextIndex=i+1;previousBytes+=file.size;await saveDraft();continue;}
       while(offset<file.size){
         const end=Math.min(offset+8*1024*1024,file.size),fd=new FormData();fd.append('stage_id',draft.stageId);fd.append('upload_id',item.id);fd.append('file_name',file.name);fd.append('total_size',String(file.size));fd.append('offset',String(offset));fd.append('course_name',draft.courseName);fd.append('chunk',file.slice(offset,end),file.name);
         setBuildStatus(end===file.size?'PDF '+(i+1)+' / '+draft.files.length+' uploaded; inspecting teaching units…':'Uploading PDF '+(i+1)+' / '+draft.files.length+': '+file.name+' · '+Math.round(100*offset/file.size)+'%. You may refresh; upload resumes from the saved chunk.');
-        let response,data;try{response=await fetch('/api/reference/course-upload-chunk',{method:'POST',body:fd,cache:'no-store'});data=await response.json();}catch(e){const check=await fetch(base,{cache:'no-store'}).then(r=>r.json());if(check.offset>offset||check.complete){data=check;}else throw e;}
-        if(!data.ok||(!response?.ok&&response))throw new Error(data.detail||data.error||'Upload HTTP '+(response&&response.status));
+        let response=null,data=null;try{response=await fetch('/api/reference/course-upload-chunk',{method:'POST',body:fd,cache:'no-store'});data=await response.json();}catch(_){data=null;}
+        if(!data||!response||RESTARTING.includes(response.status)){
+          // No answer (for example during an update): ask where the server is, then send from there.
+          const {d:check}=await getJSON(base,'Uploading');if(!check.ok)throw new Error(check.error||'Upload status unavailable');
+          if(Number(check.offset)>offset||check.complete){data=check;response=null;}
+          else{if(++failures>30)throw new Error('The upload keeps failing. Refresh to retry; the received part is kept.');continue;}
+        }
+        failures=0;
+        if(!data.ok||(response&&!response.ok))throw new Error(data.detail||data.error||'Upload HTTP '+(response&&response.status));
         offset=Number(data.offset);if(data.inspection)inspection=data.inspection;
         if(offset===file.size&&!data.complete)inspection=await waitForInspection(base,i,draft.files.length)||inspection;
         setMeter('Upload',100*(previousBytes+offset)/allBytes,Math.round(100*(previousBytes+offset)/allBytes)+'% · '+(i+1)+' / '+draft.files.length+' PDFs');
@@ -116,15 +136,14 @@ function renderInspection(){
 }
 function sourcePages(u){const src=(inspection&&inspection.sources||[]).find(x=>x.file_name===u.source_file);return Number(src&&src.pages)||Number(u.end_page)||1;}
 function rowPages(row){return {start:parseInt(row.querySelector('.v241-unit-start').value,10),end:parseInt(row.querySelector('.v241-unit-end').value,10)};}
-function updateSelectionSummary(){const el=$('v241UnitSummary');if(!el||!inspection)return;const total=(inspection.units||[]).length,selected=selectedUnits().length;el.textContent=selected+' / '+total+' units selected · '+(selected*100)+' complete evidence questions will be prepared.';}
+function updateSelectionSummary(){const el=$('v241UnitSummary');if(!el||!inspection)return;const total=(inspection.units||[]).length,selected=selectedUnits().length;el.textContent=selected+' / '+total+' units selected';}
 function saveSelections(){updateSelectionSummary();if(!draft)return;draft.selections={};for(const row of document.querySelectorAll('#v241UnitList .v241-unit-row')){const p=rowPages(row);draft.selections[row.dataset.unitId]={enabled:row.querySelector('.v241-unit-check').checked,title:row.querySelector('.v241-unit-name').value,start_page:p.start||undefined,end_page:p.end||undefined};}saveDraft().catch(e=>setBuildStatus('Could not save unit selection: '+String(e.message||e),'error'));}
 function selectAllUnits(checked){for(const box of document.querySelectorAll('#v241UnitList .v241-unit-check'))box.checked=checked;saveSelections();}
 function selectedUnits(){return [...document.querySelectorAll('#v241UnitList .v241-unit-row')].filter(r=>r.querySelector('.v241-unit-check').checked).map(r=>{const p=rowPages(r);return {id:r.dataset.unitId,title:String(r.querySelector('.v241-unit-name').value||'').trim(),start_page:p.start,end_page:p.end};});}
 function unitProblem(units){for(const u of units){const unit=(inspection.units||[]).find(x=>x.id===u.id),pages=unit?sourcePages(unit):0;if(!u.title)return 'Every selected unit needs a name.';if(!Number.isInteger(u.start_page)||!Number.isInteger(u.end_page)||u.start_page<1||u.end_page>pages||u.start_page>u.end_page)return 'Check the pages of “'+u.title+'”: they must be between 1 and '+pages+', first page not after last page.';}return '';}
 async function buildCourse(){
   if(!inspection){setBuildStatus('Inspect the uploaded PDFs first.','error');return;}const units=selectedUnits();if(!units.length){setBuildStatus('Select at least one chapter/unit.','error');return;}const problem=unitProblem(units);if(problem){setBuildStatus(problem,'error');return;}
-  const full=$('v241FullReading');
-  const body={stage_id:inspection.stage_id,course_name:String($('v241CourseName').value||'').trim(),units,model_key:modelKey(),reading:full&&full.checked?'inline':'fast'};
+  const body={stage_id:inspection.stage_id,course_name:String($('v241CourseName').value||'').trim(),units,model_key:modelKey(),reading:'fast'};
   $('v241BuildBtn').disabled=true;setMeter('Activate',0,'Extracting course material');setBuildStatus('Extracting selected units for course Q&A. You may refresh; the server continues the build.');
   try{
     if(draft){draft.phase='building';draft.buildBody=body;await saveDraft();setPending(draft.stageId);}
@@ -155,7 +174,7 @@ async function pollBuild(jid){
   try{
   for(;;){
     if(buildJobId!==jid)return;
-    const r=await fetch('/api/reference/course-job-status?id='+encodeURIComponent(jid),{cache:'no-store'}),d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||('HTTP '+r.status));
+    const {r,d}=await getJSON('/api/reference/course-job-status?id='+encodeURIComponent(jid),'Building');if(!r.ok)throw new Error(d.error||('HTTP '+r.status));
     setBuildStatus('Building course: '+String(d.progress||0)+'%\n'+String(d.message||'Working…'));
     setMeter('Activate',d.progress||0,String(d.message||'Extracting material'));
     if(d.status==='done'){
@@ -438,7 +457,7 @@ async function restoreDraft(){
     inspection=draft.inspection;renderInspection();$('v241BuildBtn').disabled=false;setBuildStatus('Saved PDF inspection restored. Review the teaching units and build.','ok');
   }else if(draft.phase==='building'||pendingStage()===draft.stageId){
     try{
-      const r=await fetch('/api/reference/course-stage-status?stage_id='+encodeURIComponent(draft.stageId),{cache:'no-store'}),d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'Stage status unavailable');
+      const {r,d}=await getJSON('/api/reference/course-stage-status?stage_id='+encodeURIComponent(draft.stageId),'Reconnecting to the build');if(!r.ok||!d.ok)throw new Error(d.error||'Stage status unavailable');
       if(d.job)await pollBuild(d.job.id);
       else if(draft.buildBody){const start=await fetch('/api/reference/course-build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(draft.buildBody),cache:'no-store'}),job=await start.json();if(!start.ok||!job.ok)throw new Error(job.error||'Build request failed');await pollBuild(job.job.id);}
     }catch(e){setBuildStatus('Build is saved, but reconnect failed: '+String(e.message||e)+'. Refresh to retry.','error');}

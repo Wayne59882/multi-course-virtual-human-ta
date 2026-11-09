@@ -84,6 +84,8 @@ with tempfile.TemporaryDirectory() as temporary:
 controller = (ROOT / 'app/web/shared/js/course/course-controller.js').read_text(encoding='utf-8')
 assert 'offset+8*1024*1024' in controller and 'waitForInspection(' in controller and "'/api/reference/course-builds'" in controller
 assert "DRAFT_KEY='current:'+id" in controller and 'v241-build-cancel' in controller
+# A server restart (an update) during upload, inspection or build is waited out, not reported as a failure.
+assert 'async function getJSON(' in controller and "getJSON(base,'Uploading')" in controller and "getJSON('/api/reference/course-job-status" in controller
 # The browser must not fill a saved login into the course name or a saved password into API key boxes.
 assert 'id="v241CourseName" type="text" name="vq-course-title" autocomplete="off"' in controller
 assert 'id="cloudApiKeyInput" type="password" autocomplete="new-password"' in (ROOT / 'app/web/reference/index.html').read_text(encoding='utf-8')

@@ -58,5 +58,20 @@ with tempfile.TemporaryDirectory() as temporary:
     try:fields=sync.site_step(target,config,{})
     finally:sync.move_site=original
     assert fields['site_pending'] is True and fields['site_attempt_at']>0
+# An update (which restarts the server) waits while a course build is reading pages, at most 3 h.
+import time
+with tempfile.TemporaryDirectory() as temporary:
+    target=Path(temporary);jobs=target/'course_workspaces'/'_jobs';jobs.mkdir(parents=True)
+    now=time.time()
+    (jobs/'old.json').write_text(json.dumps({'id':'old','status':'running','course_name':'Stale','updated_at':now-3600}))
+    (jobs/'done.json').write_text(json.dumps({'id':'done','status':'done','course_name':'Finished','updated_at':now}))
+    assert sync.running_build(target,now)==''  # a job not updated for an hour is not a running build
+    (jobs/'live.json').write_text(json.dumps({'id':'live','status':'running','course_name':'Genomic study','updated_at':now-30}))
+    assert sync.running_build(target,now)=='Genomic study'
+    previous={}
+    assert sync.defer_update(previous,'Genomic study',now) and previous['deferred_since']==now
+    assert sync.defer_update(previous,'Genomic study',now+3600)
+    assert not sync.defer_update(previous,'Genomic study',now+sync.MAX_BUILD_DEFER+1)
+    assert not sync.defer_update({},'',now)
 print('PASS atomic source install/rollback, private PDF/account preservation, original Worker name/bindings and remote variables retained, '
-      'site address moved only after the new address serves the site')
+      'site address moved only after the new address serves the site; updates wait for a running course build (at most 3 h)')
