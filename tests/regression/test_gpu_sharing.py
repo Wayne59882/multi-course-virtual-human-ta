@@ -30,8 +30,9 @@ class Handler(BaseHTTPRequestHandler):
             self.server.active+=1;self.server.peak=max(self.server.peak,self.server.active)
         self.send_response(200);self.end_headers()
         try:
-            for index in range(10):
-                self.wfile.write((json.dumps({'message':{'content':'x'},'done':index==9})+'\n').encode());self.wfile.flush()
+            count=60 if self.path.endswith('/long') else 10
+            for index in range(count):
+                self.wfile.write((json.dumps({'message':{'content':'x'},'done':index==count-1})+'\n').encode());self.wfile.flush()
                 time.sleep(.05)
         except OSError:pass
         finally:
@@ -40,6 +41,7 @@ class Handler(BaseHTTPRequestHandler):
 
 CONCURRENT={'OLLAMA_NUM_PARALLEL':'3','OLLAMA_MAX_LOADED_MODELS':'2','VQ_GPU_SHARING':'auto'}
 EXCLUSIVE={'OLLAMA_NUM_PARALLEL':'1','OLLAMA_MAX_LOADED_MODELS':'1','VQ_GPU_SHARING':'auto'}
+ONE_MODEL={'OLLAMA_NUM_PARALLEL':'2','OLLAMA_MAX_LOADED_MODELS':'1','VQ_GPU_SHARING':'auto','VQ_BACKGROUND_GRACE_SEC':'0.5'}
 
 with patch.dict(os.environ,EXCLUSIVE):
     assert not gpu_policy.concurrent() and gpu_policy.background_slots()==1 and not gpu_policy.keep_models_loaded()
@@ -47,6 +49,8 @@ with patch.dict(os.environ,CONCURRENT):
     assert gpu_policy.concurrent() and gpu_policy.background_slots()==2 and gpu_policy.keep_models_loaded()
 with patch.dict(os.environ,dict(CONCURRENT,VQ_GPU_SHARING='exclusive')):
     assert not gpu_policy.concurrent()
+with patch.dict(os.environ,ONE_MODEL):
+    assert gpu_policy.concurrent() and gpu_policy.single_model_sharing() and not gpu_policy.keep_models_loaded()
 
 with tempfile.TemporaryDirectory() as temporary:
     server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
@@ -115,6 +119,44 @@ with tempfile.TemporaryDirectory() as temporary:
                 with lock:pass
             assert time.monotonic()-began<.3
 
+        with patch.dict(os.environ,ONE_MODEL):
+            # One model fits: a Gemma student and Gemma preparation run together.
+            server.peak=0;results=[];ready=threading.Event()
+            def prepare_gemma(path='/api/chat'):
+                try:
+                    with oc.BackgroundWork():
+                        with lock.using('gemma4:12b'):
+                            ready.set();results.append(oc.stream_chat_json(url.replace('/api/chat',path),payload,10)['message']['content'])
+                except Exception as error:results.append(error)
+            worker=threading.Thread(target=prepare_gemma);worker.start();assert ready.wait(3);time.sleep(.1)
+            began=time.monotonic()
+            with oc.CancellationScope():
+                with lock.using('gemma4:12b'):
+                    waited=time.monotonic()-began
+                    oc.stream_chat_json(url,payload,5)
+            worker.join(5)
+            assert waited<.3 and results==['x'*10] and server.peak==2,(waited,results,server.peak)
+
+            # A Ministral student while Gemma prepares: the student goes first
+            # (preparation yields after the grace period) instead of model swapping.
+            results.clear();ready.clear()
+            worker=threading.Thread(target=prepare_gemma,args=('/long',));worker.start();assert ready.wait(3);time.sleep(.2)
+            began=time.monotonic()
+            with oc.CancellationScope():
+                with lock.using('ministral-3:8b'):
+                    waited=time.monotonic()-began
+                    assert oc.swap_waiting()
+                    # New Gemma preparation does not start while this student is answered.
+                    started=threading.Event()
+                    def late():
+                        with oc.BackgroundWork():
+                            with lock.using('gemma4:12b'):started.set()
+                    other=threading.Thread(target=late);other.start()
+                    assert not started.wait(.6),'preparation started while a student needed the other model'
+            worker.join(5);other.join(5)
+            assert started.is_set() and not oc.swap_waiting()
+            assert isinstance(results[0],oc.BackgroundPreempted) and .4<=waited<2.5,(results,waited)
+
         with patch.dict(os.environ,EXCLUSIVE):
             server.peak=0
             with oc.CancellationScope():
@@ -129,4 +171,4 @@ with tempfile.TemporaryDirectory() as temporary:
             assert done.wait(3);worker.join(2)
     finally:
         server.shutdown();server.server_close()
-print('PASS concurrent GPU sharing: students never wait for preparation, two chapters prepare at once without interruption, figures wait for quiet; exclusive mode keeps students first')
+print('PASS concurrent GPU sharing: students never wait for preparation, two chapters prepare at once without interruption, figures wait for quiet; with one model, same-model students share and other-model students go first; exclusive mode keeps students first')

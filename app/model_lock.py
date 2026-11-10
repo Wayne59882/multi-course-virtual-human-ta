@@ -5,6 +5,9 @@ Students and course preparation have separate slots (see gpu_policy):
 
 * concurrent mode: a student answer never waits for preparation. Preparation
   uses its own slots (several chapters at once) while students keep theirs.
+  When only one model fits, a student who needs a different model than the
+  running preparation is served first (preparation yields after a grace
+  period), because the GPU would otherwise have to swap models back and forth.
 * exclusive mode: one model call at a time on the GPU. Students go first;
   preparation does not start while a student waits, and a running step is
   interrupted after a short grace period (ollama_cancel.stream_chat_json).
@@ -19,7 +22,7 @@ import time
 import gpu_policy
 from work_steps import metric
 from ollama_cancel import (current_scope, background_active, background_check, background_idle_only,
-                           priority_waiting, student_recently_active, PriorityClaim, Waiting)
+                           priority_waiting, swap_waiting, student_recently_active, PriorityClaim, SwapClaim, Waiting)
 try:
     import fcntl
 except ImportError:
@@ -29,8 +32,8 @@ _FALLBACK=threading.Lock()  # platforms without flock: one call at a time
 
 
 class _Held(object):
-    def __init__(self):
-        self.files=[];self.claim=None;self.fallback=False
+    def __init__(self,model=None):
+        self.files=[];self.claim=None;self.swap=None;self.fallback=False;self.model=model
 
 
 class SharedModelLock:
@@ -38,32 +41,64 @@ class SharedModelLock:
         self.path=path or os.environ.get('VQ_SHARED_MODEL_LOCK','/tmp/vq_ollama_answer.lock')
         self._local=threading.local()
 
+    def using(self,model):
+        """with lock.using(tag): the next acquisition in this thread is for this model."""
+        self._local.model=model
+        return self
+
     # -- slot files -------------------------------------------------------
     def _open(self,path):
         directory=os.path.dirname(os.path.abspath(path))
         if directory and not os.path.isdir(directory):os.makedirs(directory,exist_ok=True)
         return open(path,'a+')
 
-    def _try(self,path):
+    def _try(self,path,shared=False):
         stream=self._open(path)
         try:
-            fcntl.flock(stream.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+            fcntl.flock(stream.fileno(),(fcntl.LOCK_SH if shared else fcntl.LOCK_EX)|fcntl.LOCK_NB)
             return stream
         except BlockingIOError:
             stream.close();return None
 
-    def _try_any(self,kind,count):
+    def _label(self,stream,model):
+        # The slot file names the model in use, so other processes can see it.
+        try:
+            stream.seek(0);stream.truncate();stream.write(str(model or ''));stream.flush()
+        except (OSError,ValueError):
+            pass
+
+    def _try_any(self,kind,count,model=None):
         for index in range(count):
             stream=self._try('%s.%s.%d'%(self.path,kind,index))
-            if stream is not None:return stream
+            if stream is not None:
+                self._label(stream,model);return stream
         return None
 
-    def _wait_any(self,kind,count,check):
+    def _wait_any(self,kind,count,check,model=None):
         while True:
             if check:check()
-            stream=self._try_any(kind,count)
+            stream=self._try_any(kind,count,model)
             if stream is not None:return stream
             time.sleep(0.05)
+
+    def _models_in_use(self,kind,count):
+        """Models named by the slots of this kind that are held right now."""
+        found=set()
+        if fcntl is None:return found
+        for index in range(max(count,4)):
+            path='%s.%s.%d'%(self.path,kind,index)
+            if not os.path.exists(path):continue
+            stream=self._try(path)
+            if stream is not None:
+                stream.close();continue
+            try:
+                with open(path) as reader:found.add(reader.read().strip())
+            except OSError:
+                pass
+        return found
+
+    def _conflict(self,kind,model):
+        return any(other and model and other!=model for other in self._models_in_use(kind,gpu_policy.background_slots()+gpu_policy.student_slots()))
 
     def _wait_gpu(self,check,blocking):
         if blocking:
@@ -100,16 +135,24 @@ class SharedModelLock:
                     if check:check()
                 held.fallback=True
             else:
-                held.files.append(self._wait_any('student',gpu_policy.student_slots(),check))
+                held.files.append(self._wait_any('student',gpu_policy.student_slots(),check,held.model))
                 if not gpu_policy.concurrent():
+                    held.files.append(self._wait_gpu(check,blocking=check is None))
+                elif gpu_policy.single_model_sharing() and self._conflict('background',held.model):
+                    # Only one model fits and preparation is using another one: go first.
+                    held.swap=SwapClaim().__enter__()
                     held.files.append(self._wait_gpu(check,blocking=check is None))
             metric('model_lock_wait_seconds',time.monotonic()-started)
         except BaseException:
-            self._release(held);held.claim.__exit__();held.claim=None;raise
+            self._release(held);held.claim.__exit__();held.claim=None
+            if held.swap is not None:held.swap.__exit__();held.swap=None
+            raise
 
     # -- course preparation -----------------------------------------------
-    def _blocked(self,turn):
+    def _blocked(self,turn,model=None):
         if not gpu_policy.concurrent() and priority_waiting():return True   # students first
+        if gpu_policy.single_model_sharing() and (swap_waiting() or self._conflict('student',model)):
+            return True  # a student needs the other model
         if background_idle_only() and student_recently_active():return True  # figures wait for quiet
         return turn.paused() or not turn.first()
 
@@ -117,11 +160,13 @@ class SharedModelLock:
         if fcntl is None:
             if not _FALLBACK.acquire(False):return False
             held.fallback=True;return True
-        slot=self._try_any('background',gpu_policy.background_slots())
+        slot=self._try_any('background',gpu_policy.background_slots(),held.model)
         if slot is None:return False
         held.files.append(slot)
-        if not gpu_policy.concurrent():
-            gpu=self._try(self.path)
+        if not gpu_policy.concurrent() or gpu_policy.single_model_sharing():
+            # Exclusive: the whole GPU. Single model: shared with other preparation,
+            # so a student who needs the other model can take it exclusively.
+            gpu=self._try(self.path,shared=gpu_policy.concurrent())
             if gpu is None:
                 self._release(held);return False
             held.files.append(gpu)
@@ -133,11 +178,11 @@ class SharedModelLock:
         with Waiting() as turn:
             started=time.monotonic()
             while True:
-                while self._blocked(turn):
+                while self._blocked(turn,held.model):
                     background_check();time.sleep(0.2)
                 background_check()
                 if self._try_background(held):
-                    if not self._blocked(turn):
+                    if not self._blocked(turn,held.model):
                         metric('model_lock_wait_seconds',time.monotonic()-started)
                         metric('background_queue_seconds',time.monotonic()-started)
                         return
@@ -147,7 +192,7 @@ class SharedModelLock:
     def __enter__(self):
         stack=getattr(self._local,'stack',None)
         if stack is None:stack=self._local.stack=[]
-        held=_Held()
+        held=_Held(getattr(self._local,'model',None));self._local.model=None
         if background_active():self._enter_background(held)
         else:self._enter_student(held)
         stack.append(held)
@@ -157,5 +202,6 @@ class SharedModelLock:
         held=self._local.stack.pop()
         try:self._release(held)
         finally:
+            if held.swap is not None:held.swap.__exit__()
             if held.claim is not None:held.claim.__exit__()
         return False

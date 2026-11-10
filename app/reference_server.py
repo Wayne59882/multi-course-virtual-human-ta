@@ -94,7 +94,7 @@ def course_model_call(server,model_key,system,user,max_tokens=1200):
     def compute():
         while True:
             try:
-                with server.model_lock:
+                with server.model_lock.using(tag):
                     ensure_single_active_model(server,key,tag,base)
                     started=time.monotonic()
                     try:d=url_json(base+'/api/chat',payload=payload,timeout=max(LOCAL_MAX_WAIT,360))
@@ -667,7 +667,7 @@ def semantic_review_answer(server,key,tag,base,q,context,language_tag,kind,draft
     payload={'model':tag,'messages':[{'role':'system','content':system},{'role':'user','content':prompt}],
              'think':False,'stream':False,'keep_alive':MODEL_KEEP_ALIVE,'format':'json',
              'options':{'temperature':0.0,'top_p':0.55,'num_ctx':MODEL_NUM_CTX,'num_predict':420 if feedback_rewrite else 220,'repeat_penalty':1.0}}
-    with server.model_lock:
+    with server.model_lock.using(tag):
         ensure_single_active_model(server,key,tag,base)
         d=url_json(base+'/api/chat',payload=payload,timeout=LOCAL_MAX_WAIT)
         server.active_model_key=key; server.active_model_tag=tag; server.active_model_base=base
@@ -750,7 +750,7 @@ def local_mcq_answer(server,key,tag,base,q,context,language_tag,kind):
     payload={'model':tag,'messages':[{'role':'system','content':'You are a strict human-physiology exam answer auditor. Output valid JSON only. Never cite a source, figure, table, page or chapter.'},{'role':'user','content':prompt}],
              'think':False,'stream':False,'keep_alive':MODEL_KEEP_ALIVE,
              'format':'json','options':{'temperature':0.0,'top_p':0.6,'num_ctx':MODEL_NUM_CTX,'num_predict':260,'repeat_penalty':1.0}}
-    with server.model_lock:
+    with server.model_lock.using(tag):
         ensure_single_active_model(server,key,tag,base)
         d=url_json(base+'/api/chat',payload=payload,timeout=LOCAL_MAX_WAIT)
         server.active_model_key=key; server.active_model_tag=tag; server.active_model_base=base
@@ -889,7 +889,7 @@ def _run_batch_json(server,key,tag,base,system_text,user_text,num_predict):
     payload={'model':tag,'messages':[{'role':'system','content':system_text},{'role':'user','content':user_text}],
              'think':False,'stream':False,'keep_alive':MODEL_KEEP_ALIVE,'format':'json',
              'options':{'temperature':0.0,'top_p':0.58,'num_ctx':BATCH_NUM_CTX,'num_predict':int(num_predict),'repeat_penalty':1.0}}
-    with server.model_lock:
+    with server.model_lock.using(tag):
         ensure_single_active_model(server,key,tag,base)
         d=url_json(base+'/api/chat',payload=payload,timeout=LOCAL_MAX_WAIT)
         server.active_model_key=key;server.active_model_tag=tag;server.active_model_base=base
@@ -1206,7 +1206,7 @@ def language_repair(server,tag,answer,language_tag,base=None):
         {'role':'user','content':str(answer or '')}],
         'think':False,'stream':False,'keep_alive':MODEL_KEEP_ALIVE,
         'options':{'temperature':0.0,'top_p':0.8,'num_ctx':MODEL_NUM_CTX,'num_predict':260,'repeat_penalty':1.0}}
-    with server.model_lock:
+    with server.model_lock.using(tag):
         d=url_json((base or OLLAMA_BASE).rstrip('/')+'/api/chat',payload=payload,timeout=LOCAL_MAX_WAIT)
     return clean_answer(((d.get('message') or {}).get('content') or ''))
 
@@ -1227,7 +1227,7 @@ def blind_constraint_verify_mcq(server,key,tag,base,q,context,language_tag,kind)
     payload={'model':tag,'messages':[{'role':'system','content':system},{'role':'user','content':prompt}],
              'think':False,'stream':False,'keep_alive':MODEL_KEEP_ALIVE,'format':'json',
              'options':{'temperature':0.0,'top_p':0.55,'num_ctx':MODEL_NUM_CTX,'num_predict':220,'repeat_penalty':1.0}}
-    with server.model_lock:
+    with server.model_lock.using(tag):
         ensure_single_active_model(server,key,tag,base)
         d=url_json(base+'/api/chat',payload=payload,timeout=LOCAL_MAX_WAIT)
         server.active_model_key=key;server.active_model_tag=tag;server.active_model_base=base
@@ -1250,7 +1250,7 @@ def adjudicate_constraint_disagreement(server,key,tag,base,q,context,language_ta
     payload={'model':tag,'messages':[{'role':'system','content':system},{'role':'user','content':prompt}],
              'think':False,'stream':False,'keep_alive':MODEL_KEEP_ALIVE,'format':'json',
              'options':{'temperature':0.0,'top_p':0.5,'num_ctx':MODEL_NUM_CTX,'num_predict':220,'repeat_penalty':1.0}}
-    with server.model_lock:
+    with server.model_lock.using(tag):
         ensure_single_active_model(server,key,tag,base)
         d=url_json(base+'/api/chat',payload=payload,timeout=LOCAL_MAX_WAIT)
     obj=_extract_json_object(((d.get('message') or {}).get('content') or '')) or {}
@@ -1282,7 +1282,7 @@ def challenge_high_risk_agreement(server,key,tag,base,q,context,language_tag,kin
     payload={'model':tag,'messages':[{'role':'system','content':system},{'role':'user','content':prompt}],
              'think':False,'stream':False,'keep_alive':MODEL_KEEP_ALIVE,'format':'json',
              'options':{'temperature':0.0,'top_p':0.48,'num_ctx':MODEL_NUM_CTX,'num_predict':300,'repeat_penalty':1.0}}
-    with server.model_lock:
+    with server.model_lock.using(tag):
         ensure_single_active_model(server,key,tag,base)
         d=url_json(base+'/api/chat',payload=payload,timeout=LOCAL_MAX_WAIT)
     obj=_extract_json_object(((d.get('message') or {}).get('content') or '')) or {}
@@ -1355,7 +1355,7 @@ def local_answer(server,model_key,q,context,language_tag,retrieval=None):
     payload={'model':tag,'messages':[{'role':'system','content':system_prompt(language_tag)},{'role':'user','content':user_prompt(q,context,language_tag)}],
              'think':False,'stream':False,'keep_alive':MODEL_KEEP_ALIVE,
              'options':{'temperature':temp,'top_p':0.78 if temp else 0.65,'num_ctx':MODEL_NUM_CTX,'num_predict':num_predict,'repeat_penalty':1.01}}
-    with server.model_lock:
+    with server.model_lock.using(tag):
         ensure_single_active_model(server,key,tag,base)
         d=url_json(base+'/api/chat',payload=payload,timeout=LOCAL_MAX_WAIT)
         server.active_model_key=key; server.active_model_tag=tag; server.active_model_base=base
@@ -1366,7 +1366,7 @@ def local_answer(server,model_key,q,context,language_tag,retrieval=None):
         retry={'model':tag,'messages':[{'role':'system','content':system_prompt(language_tag)},{'role':'user','content':retry_user}],
                'think':False,'stream':False,'keep_alive':MODEL_KEEP_ALIVE,
                'options':{'temperature':0.0,'top_p':0.65,'num_ctx':MODEL_NUM_CTX,'num_predict':560,'repeat_penalty':1.0}}
-        with server.model_lock:
+        with server.model_lock.using(tag):
             d2=url_json(base+'/api/chat',payload=retry,timeout=LOCAL_MAX_WAIT)
         ans2=clean_answer(((d2.get('message') or {}).get('content') or ''))
         if str(d2.get('done_reason','')).lower()=='length':raise RuntimeError('Local answer remained truncated after recovery')
@@ -1864,7 +1864,7 @@ class Handler(SharedAssetsMixin, SimpleHTTPRequestHandler):
             except Exception:self.send_json(400,{'error':'Invalid JSON'});return
             try:
                 p={'model':tag,'messages':[{'role':'user','content':'Reply OK only.'}],'think':False,'stream':False,'keep_alive':MODEL_KEEP_ALIVE,'options':{'num_ctx':MODEL_NUM_CTX,'num_predict':1,'temperature':0}}
-                with self.server.model_lock:
+                with self.server.model_lock.using(tag):
                     ensure_single_active_model(self.server,key,tag,base)
                     url_json(base+'/api/chat',payload=p,timeout=180)
                     self.server.active_model_key=key;self.server.active_model_tag=tag;self.server.active_model_base=base

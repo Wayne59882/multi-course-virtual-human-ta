@@ -26,6 +26,7 @@ starts (`app/gpu_policy.py` reads the same values):
 |---|---|---|---|
 | at least `VQ_GPU_FULL_MIB` (20000 MiB) | 3 | 2 | concurrent: a student plus two preparation steps |
 | at least `VQ_GPU_SHARED_MIB` (14000 MiB) | 2 | 2 | concurrent: a student plus one preparation step |
+| at least `VQ_GPU_SINGLE_MIB` (10000 MiB) | 2 | 1 | concurrent on one model (Gemma); a student using Ministral goes first |
 | less | 1 | 1 | exclusive |
 
 In concurrent mode a student answer has its own request slot and starts while
@@ -55,9 +56,18 @@ python3 scripts/runtime/restart_model_ollama.py
 It restarts only the model Ollama (not the embedding Ollama), keeps its
 binary, model folder and environment, chooses the values from the GPU memory
 free after it stopped, loads Gemma (and Ministral when two models fit) and
-reports whether each model is fully on the GPU. The services switch within a
-minute. These settings do not reserve GPU memory against other users'
-processes.
+checks that each model is fully on the GPU; if not, it steps down to the next
+setting and remembers that. The services switch within a minute.
+
+Nobody needs to run it by hand: the automatic updater runs it with `--auto`
+every ten minutes. It moves to a larger setting only when more GPU memory is
+free and students have been quiet for `VQ_GPU_RESTART_QUIET_SEC` (600 s), and
+steps down at once when a model no longer fits. These settings do not reserve
+GPU memory against other users' processes.
+
+With one model loaded, a student who picks the other model than the one
+preparation is using is served first: preparation yields after the grace
+period instead of making the GPU swap models back and forth.
 
 ## Automatic recovery
 

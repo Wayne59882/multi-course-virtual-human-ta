@@ -8,7 +8,11 @@
 #          Gemma and Ministral stay loaded together.
 #   free >= VQ_GPU_SHARED_MIB (default 14000): 2 requests, 2 models
 #       -> a student answer plus one preparation step at once.
+#   free >= VQ_GPU_SINGLE_MIB (default 10000): 2 requests, 1 model
+#       -> shared while students use Gemma; a Ministral student goes first.
 #   otherwise: 1 request, 1 model (students first, preparation yields).
+# scripts/runtime/restart_model_ollama.py uses the same thresholds, checks that
+# the models fit completely and steps down when they do not.
 #
 # The serving processes read the same exported values (app/gpu_policy.py).
 # Restart the private Ollama after changing them.
@@ -30,6 +34,7 @@ vq_choose_gpu_capacity() {
   if [[ -n "$free" ]]; then
     if (( free >= ${VQ_GPU_FULL_MIB:-20000} )); then parallel=3; loaded=2
     elif (( free >= ${VQ_GPU_SHARED_MIB:-14000} )); then parallel=2; loaded=2
+    elif (( free >= ${VQ_GPU_SINGLE_MIB:-10000} )); then parallel=2; loaded=1
     fi
   fi
   export OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-$parallel}"

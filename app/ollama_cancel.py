@@ -24,6 +24,9 @@ import gpu_policy
 
 PRIORITY_DIR = os.environ.get('VQ_MODEL_PRIORITY_DIR', '/tmp/vq_ollama_priority')
 ACTIVITY_PATH = PRIORITY_DIR.rstrip('/') + '.last-student'
+# Students who need a different model than the one preparation is using
+# (only when a single model fits on the GPU).
+SWAP_DIR = PRIORITY_DIR.rstrip('/') + '.swap'
 PREEMPT_POLL_SEC = 0.25
 CLAIM_MAX_AGE_SEC = 1800
 # Ollama reloads a model whenever num_ctx changes between requests, so every
@@ -181,15 +184,16 @@ def _process_alive(pid):
     return True
 
 
-def priority_waiting():
+def priority_waiting(directory=None):
     """True while any live server process has a student answer waiting or running."""
+    directory = directory or PRIORITY_DIR
     try:
-        names = os.listdir(PRIORITY_DIR)
+        names = os.listdir(directory)
     except OSError:
         return False
     now = time.time()
     for name in names:
-        path = os.path.join(PRIORITY_DIR, name)
+        path = os.path.join(directory, name)
         try:
             pid = int(name.split('-', 1)[0])
         except ValueError:
@@ -206,16 +210,24 @@ def priority_waiting():
     return False
 
 
+def swap_waiting():
+    """True while a student waits for a model other than the one preparation uses."""
+    return priority_waiting(SWAP_DIR)
+
+
 class PriorityClaim(object):
     """Visible to every server process while a student answer needs the model."""
+    directory = None
+
     def __init__(self):
         self.path = None
 
     def __enter__(self):
+        directory = self.directory or PRIORITY_DIR
         try:
-            if not os.path.isdir(PRIORITY_DIR):
-                os.makedirs(PRIORITY_DIR, exist_ok=True)
-            path = os.path.join(PRIORITY_DIR, '%d-%s' % (os.getpid(), uuid.uuid4().hex))
+            if not os.path.isdir(directory):
+                os.makedirs(directory, exist_ok=True)
+            path = os.path.join(directory, '%d-%s' % (os.getpid(), uuid.uuid4().hex))
             with open(path, 'w') as stream:
                 stream.write('%.3f' % time.time())
             self.path = path
@@ -233,6 +245,11 @@ class PriorityClaim(object):
         self.path = None
         note_student_activity()
         return False
+
+
+class SwapClaim(PriorityClaim):
+    """A student needs a different model while only one model fits on the GPU."""
+    directory = SWAP_DIR
 
 
 def _interrupt(sock):
@@ -315,11 +332,18 @@ def stream_chat_json(url, payload, timeout):
         raise RuntimeError('Streaming chat requires a cancellation scope or background work')
     if scope is not None:
         scope.check()
-    # Exclusive mode only: students and preparation cannot run together.
-    grace = None if not background or gpu_policy.concurrent() else gpu_policy.grace_seconds()
+    # Students and preparation cannot run together in exclusive mode, nor when a
+    # student needs a different model while only one model fits.
+    grace = None
+    waiting = priority_waiting
+    if background:
+        if not gpu_policy.concurrent():
+            grace = gpu_policy.grace_seconds()
+        elif gpu_policy.single_model_sharing():
+            grace, waiting = gpu_policy.grace_seconds(), swap_waiting
     if background:
         background_check()
-        if grace == 0 and priority_waiting():
+        if grace == 0 and waiting():
             raise BackgroundPreempted('A student answer is waiting for the model')
     conn, path = _connection(url, timeout)
     stop = threading.Event()
@@ -340,7 +364,7 @@ def stream_chat_json(url, payload, timeout):
                         background_check()
                         if time.monotonic()-began>deadline:
                             reason['error']=TimeoutError('Background model step exceeded its wall-clock limit')
-                        elif grace is not None and priority_waiting():
+                        elif grace is not None and waiting():
                             # A short grace period lets an almost finished step complete.
                             if waiting_since[0] is None:waiting_since[0]=time.monotonic()
                             if time.monotonic()-waiting_since[0]>=grace:

@@ -154,7 +154,7 @@ class LocalVision:
             def compute():
                 while True:
                     try:
-                        with LOCK:
+                        with LOCK.using(self.model):
                             started=time.monotonic()
                             try:data=stream_chat_json(self.base+'/api/chat',payload,180) if background_active() else self.request('/api/chat',payload)
                             finally:metric('model_request_seconds',time.monotonic()-started)

@@ -16,6 +16,7 @@ import shlex
 import shutil
 import signal
 import socket
+import sys
 import subprocess
 import tempfile
 import time
@@ -95,6 +96,32 @@ def site_step(target,cfg,previous):
         print('SITE ADDRESS UNCHANGED: '+str(error)[:400]+' Retrying later.',flush=True)
         return {'site_pending':True,'site_attempt_at':time.time()}
     return {'site_url':site} if site else {}
+
+GPU_CHECK_SECONDS=600
+
+def gpu_step(target,now=None,runner=None):
+    """Every ten minutes: let the model Ollama use more of the GPU when it is free
+    (students quiet), or step down when a model no longer fits. Never raises."""
+    now=time.time() if now is None else now
+    path=target/'logs'/'gpu_sharing_check.json'
+    try:
+        last=float(json.loads(path.read_text()).get('checked_at') or 0)
+    except (OSError,ValueError,AttributeError):
+        last=0
+    if now-last<GPU_CHECK_SECONDS:return None
+    try:path.write_text(json.dumps({'checked_at':now}))
+    except OSError:return None
+    script=ROOT/'scripts'/'runtime'/'restart_model_ollama.py'
+    if not script.is_file():return None
+    try:
+        if runner is not None:return runner([sys.executable,str(script),'--auto'])
+        output=subprocess.check_output([sys.executable,str(script),'--auto'],cwd=str(ROOT),stderr=subprocess.STDOUT,timeout=900)
+        text=output.decode('utf-8','replace').strip()
+        if text:print('GPU SHARING: '+text.replace('\n','\n  '),flush=True)
+        return text
+    except Exception as error:
+        print('GPU SHARING CHECK SKIPPED: '+str(error)[:300],flush=True)
+        return None
 
 def ci_passed(sha):
     url='https://api.github.com/repos/'+REPO+'/actions/runs?event=push&head_sha='+sha+'&per_page=30'
@@ -304,7 +331,7 @@ def main():
                 fields=site_step(target,load_config(target/'wrangler.jsonc',target),{})
                 for key in ('site_pending','site_attempt_at'):previous.pop(key,None)
                 previous.update(fields);state.write_text(json.dumps(previous))
-            print('Already synchronized: '+sha);return
+            print('Already synchronized: '+sha);gpu_step(target);return
         if not ci_passed(sha):print('Waiting for successful Offline checks on '+sha);return
         if not args.apply:print('CI-approved update available: '+sha);return
         run(['git','merge','--ff-only','origin/main'])
@@ -331,6 +358,7 @@ def main():
             if args.publish:record.update(site_step(target,cfg,previous))
             state.write_text(json.dumps(record))
             print('SYNC COMPLETE '+sha+'; backup '+str(backup))
+            gpu_step(target)
         except Exception:
             restore_files(target,backup)
             errors=restore_services(target,services)

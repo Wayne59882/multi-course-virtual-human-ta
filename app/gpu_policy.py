@@ -4,11 +4,14 @@ The private Ollama server is started with a parallel request count and a
 loaded-model count chosen from the GPU memory that is free at start-up
 (scripts/lib/gpu_capacity.sh). This module reads the same settings:
 
-* concurrent mode (Ollama can serve at least two requests and keep two
-  models): a student answer and course preparation run at the same time.
-  Students keep their own request slot, so preparation never sits in front of
-  them; preparation uses the remaining slots, which also lets several chapters
-  be written at once. Gemma and Ministral may stay loaded together.
+* concurrent mode (Ollama can serve at least two requests): a student answer
+  and course preparation run at the same time. Students keep their own
+  request slot, so preparation never sits in front of them; preparation uses
+  the remaining slots, which also lets several chapters be written at once.
+  With room for two models, Gemma and Ministral stay loaded together. With
+  room for one model, sharing works while students use the model preparation
+  is using (Gemma by default); a student who picks the other model is served
+  first, as in exclusive mode.
 * exclusive mode (too little free GPU memory): one request at a time, as in
   earlier releases. Students go first; a running preparation step gets a short
   grace period to finish and is then interrupted. Completed steps are saved,
@@ -148,7 +151,12 @@ def concurrent():
         return False
     if mode == 'concurrent':
         return True
-    return ollama_parallel() >= 2 and ollama_loaded_models() >= 2
+    return ollama_parallel() >= 2
+
+
+def single_model_sharing():
+    """Concurrent, but only one model fits: other-model students go first instead."""
+    return concurrent() and ollama_loaded_models() < 2
 
 
 def student_slots():

@@ -588,7 +588,7 @@ def run_selected_chat(server, model_key, messages, options, timeout, json_format
     meta = model_meta(key)
     tag = meta["tag"]
     base = model_api_base(key)
-    with server.model_lock:
+    with server.model_lock.using(tag):
         if server.mode != "ollama":
             raise RuntimeError("Local model mode is not enabled")
         if not ollama_ready(base):
