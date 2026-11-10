@@ -778,34 +778,51 @@
   // student speaks. It only previews text: it never submits, and it is restarted
   // when the browser ends a recognition session, until the student's Stop.
   // The complete MediaRecorder audio is still transcribed by Faster-Whisper.
+  // Finished phrases are kept in rec.__vqCommitted, which server Whisper
+  // windows also extend, so neither source can erase the other's words.
   const VQ_WEB_SPEECH_FATAL=/^(not-allowed|service-not-allowed|language-not-supported|audio-capture|network)$/;
+  // A browser recognizer that stays silent this long while the student keeps
+  // speaking has stalled: it is restarted and Whisper fills in the words.
+  const VQ_WEB_SPEECH_STALL_MS=5000;
+  function showVoiceText(rec,qBox,interim){
+    displayLiveVoiceText(rec,qBox,joinVoiceText(rec.__vqCommitted||'',interim||''));
+  }
+  function commitVoiceText(rec,text){
+    const t=clean(text);if(t)rec.__vqCommitted=appendVoiceSegment(rec.__vqCommitted||'',t);
+  }
   function startWebSpeechPreview(rec,qBox){
     const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
     if(!rec || rec.__vqWebSpeech)return;
     if(!SR){rec.__vqWebSpeechFailed=true;return;}
-    const ws={closed:false,sr:null,base:'',startedAt:0,quickEnds:0,fatal:''};
+    const ws={closed:false,sr:null,startedAt:0,quickEnds:0,fatal:'',finalCount:0,interim:'',lastResultAt:Date.now()};
     rec.__vqWebSpeech=ws;rec.__vqWebSpeechFailed=false;
     const active=()=>rec.__vqWebSpeech===ws && !ws.closed && !rec.__vqCancelled &&
       !rec.__vqFinalizing && window.__v105_active_recognition===rec;
+    const commitInterim=()=>{commitVoiceText(rec,ws.interim);ws.interim='';ws.finalCount=0;};
     const launch=()=>{
-      if(!active())return;
+      if(!active() || ws.sr)return;
       let sr;
       try{sr=new SR();}catch(_){rec.__vqWebSpeechFailed=true;return;}
       sr.__vqManualVoiceOwner=true;
       sr.lang=browserFallbackLanguage();sr.interimResults=true;sr.continuous=true;
-      ws.sr=sr;ws.base=clean(rec.__vqPreviewTranscript||'');ws.startedAt=Date.now();
+      ws.sr=sr;ws.finalCount=0;ws.interim='';ws.startedAt=Date.now();
       sr.onresult=ev=>{
         if(!active() || ws.sr!==sr)return;
-        let session='';
-        const results=ev.results||[];
-        for(let i=0;i<results.length;i++)session=joinVoiceText(session,(results[i][0]&&results[i][0].transcript)||'');
-        if(!session)return;
-        ws.quickEnds=0;rec.__vqWebSpeechHeard=true;
-        displayLiveVoiceText(rec,qBox,joinVoiceText(ws.base,session));
+        const results=ev.results||[];let interim='';
+        for(let i=ws.finalCount;i<results.length;i++){
+          const text=(results[i] && results[i][0] && results[i][0].transcript)||'';
+          if(results[i] && results[i].isFinal && i===ws.finalCount){commitVoiceText(rec,text);ws.finalCount=i+1;}
+          else interim=joinVoiceText(interim,text);
+        }
+        ws.interim=clean(interim);
+        ws.quickEnds=0;ws.lastResultAt=Date.now();rec.__vqWebSpeechHeard=true;
+        if(rec.__vqOnBrowserText)rec.__vqOnBrowserText();
+        showVoiceText(rec,qBox,ws.interim);
       };
       sr.onerror=ev=>{const code=String((ev&&ev.error)||'');if(VQ_WEB_SPEECH_FATAL.test(code))ws.fatal=code;};
       sr.onend=()=>{
         if(ws.sr===sr)ws.sr=null;
+        commitInterim();
         if(!active())return;
         if(ws.fatal){rec.__vqWebSpeechFailed=true;return;}
         // Browsers end continuous recognition after silence or about a minute.
@@ -815,6 +832,16 @@
         setTimeout(launch,ws.quickEnds?600:150);
       };
       try{sr.start();}catch(_){if(ws.sr===sr)ws.sr=null;rec.__vqWebSpeechFailed=true;}
+    };
+    // A stalled recognizer (no end event, no results) is replaced by a new one.
+    ws.restart=()=>{
+      const sr=ws.sr;ws.sr=null;commitInterim();showVoiceText(rec,qBox,'');
+      if(sr){
+        try{sr.onresult=null;sr.onerror=null;sr.onend=null;}catch(_){ }
+        try{if(sr.abort)sr.abort();else if(sr.stop)sr.stop();}catch(_){ }
+      }
+      ws.lastResultAt=Date.now();
+      setTimeout(launch,150);
     };
     launch();
   }
@@ -933,7 +960,14 @@
       p.rate=p.ctx.sampleRate;
       p.source=p.ctx.createMediaStreamSource(rec.__vqStream);
       p.gain=p.ctx.createGain();p.gain.gain.value=0;
-      const receive=frame=>{if(active() && frame && frame.length){p.parts.push(new Float32Array(frame));p.count+=frame.length;}};
+      const receive=frame=>{
+        if(!active() || !frame || !frame.length)return;
+        let sum=0;for(let i=0;i<frame.length;i++)sum+=frame[i]*frame[i];
+        if(Math.sqrt(sum/frame.length)>0.01)p.lastSpeechAt=Date.now();  // the student is speaking
+        p.parts.push(new Float32Array(frame));p.count+=frame.length;
+      };
+      // Browser words cover the audio so far: Whisper only needs what comes after.
+      rec.__vqOnBrowserText=()=>{p.parts=[];p.count=0;p.offset=0;p.tail=null;};
       if(p.ctx.audioWorklet && window.AudioWorkletNode && window.URL){
         const code=`class VoiceCapture extends AudioWorkletProcessor{
           constructor(){super();this.buf=new Float32Array(4096);this.at=0;}
@@ -962,12 +996,23 @@
       p.source.connect(p.node);p.node.connect(p.gain);p.gain.connect(p.ctx.destination);
       const pump=async()=>{
         if(!active() || p.busy)return;
-        if(rec.__vqWebSpeech && rec.__vqWebSpeechHeard && !rec.__vqWebSpeechFailed){
+        const ws=rec.__vqWebSpeech;let gap=false;
+        if(ws && rec.__vqWebSpeechHeard && !rec.__vqWebSpeechFailed){
           // Browser live text has produced words; keep server STT free for the
           // final audio. Until then (or after it fails) Whisper windows supply text.
-          p.parts=[];p.count=0;p.offset=0;p.tail=null;return;
+          const stalled=(p.lastSpeechAt||0)-ws.lastResultAt>VQ_WEB_SPEECH_STALL_MS &&
+            Date.now()-ws.lastResultAt>VQ_WEB_SPEECH_STALL_MS;
+          if(!stalled){
+            if(p.count>p.rate*12)takeVoicePcm(p,p.count-Math.round(p.rate*12));  // only the newest audio
+            return;
+          }
+          // The student kept speaking but the browser stopped producing text:
+          // restart it and let Whisper transcribe what it missed.
+          rec.__vqWebSpeechHeard=false;
+          if(ws.restart)ws.restart();
+          gap=true;
         }
-        if(p.count<p.rate*4)return;
+        if(p.count<p.rate*(gap?1:4))return;
         const next=takeVoicePcm(p,Math.min(p.count,Math.round(p.rate*12)));
         const tail=p.tail||new Float32Array(0),audio=new Float32Array(tail.length+next.length);
         audio.set(tail);audio.set(next,tail.length);
@@ -978,7 +1023,11 @@
         if(p.controller)p.requestTimer=setTimeout(()=>p.controller&&p.controller.abort(),45000);
         try{
           const data=await postVoiceStt(encodeVoiceWav(audio,p.rate),'audio/wav',p.controller?p.controller.signal:null);
-          if(active() && clean(data.text||''))displayLiveVoiceText(rec,qBox,appendVoiceSegment(rec.__vqPreviewTranscript,data.text));
+          if(active() && clean(data.text||'')){
+            commitVoiceText(rec,data.text);
+            const browser=rec.__vqWebSpeech;
+            showVoiceText(rec,qBox,browser?browser.interim:'');
+          }
         }catch(_){ /* Preserve full recording; only the user's Stop submits a question. */ }
         finally{
           if(p.requestTimer)clearTimeout(p.requestTimer);
@@ -1117,7 +1166,7 @@
       const preferred=['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus'];
       let mime=''; for(const m of preferred){ if(MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)){mime=m;break;} }
       const rec=mime?new MediaRecorder(stream,{mimeType:mime}):new MediaRecorder(stream);
-      rec.__vqServerAudio=true; rec.__vqChunks=[]; rec.__vqStream=stream; rec.__vqSubmitting=false; rec.__vqStartToken=myToken; rec.__vqPreviewTranscript=''; rec.__vqManualStopRequested=false;
+      rec.__vqServerAudio=true; rec.__vqChunks=[]; rec.__vqStream=stream; rec.__vqSubmitting=false; rec.__vqStartToken=myToken; rec.__vqPreviewTranscript=''; rec.__vqCommitted=''; rec.__vqManualStopRequested=false;
       window.__v105_active_recognition=rec;
       rec.ondataavailable=e=>{if(e.data&&e.data.size)rec.__vqChunks.push(e.data);};
       rec.onstart=()=>{

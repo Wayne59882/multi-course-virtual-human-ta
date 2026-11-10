@@ -227,9 +227,44 @@ test('R9: mode switch closes browser live text without restarting or submitting'
 test('R9: when browser recognition stays silent, server Whisper windows still show live text',async()=>{
   const f=fixture({speech:true});await f.api.startRecognition();assert.equal(f.recognizers.length,1);
   f.push(4);await f.advance(1000);assert.equal(f.requests.length,1);assert.equal(f.box.textContent,'New spoken words.');
-  f.recognizers[0].result('Browser words now');assert.equal(f.box.textContent,'Browser words now');
+  // Browser words continue after the Whisper words instead of erasing them.
+  f.recognizers[0].result('Browser words now');assert.equal(f.box.textContent,'New spoken words. Browser words now');
   f.push(8);await f.advance(5000);assert.equal(f.requests.length,1,'Whisper preview pauses once browser text works');
   assert.equal(f.submissions.length,0);
+});
+test('R19: a browser recognizer that stalls mid-recording is restarted and Whisper fills the gap',async()=>{
+  const f=fixture({speech:true});await f.api.startRecognition();
+  f.recognizers[0].result('First words');assert.equal(f.box.textContent,'First words');
+  // The student keeps talking, but the browser recognizer goes quiet without ending.
+  await f.advance(6000);f.push(3);await f.advance(1000);
+  assert.equal(f.requests.length,1,'Whisper transcribes what the browser missed');
+  assert.equal(f.box.textContent,'First words New spoken words.');
+  await f.advance(1000);assert.equal(f.recognizers.length,2,'a new browser recognizer is started');
+  f.recognizers[1].result('and the rest',false);
+  assert.equal(f.box.textContent,'First words New spoken words. and the rest');
+  f.recognizers[1].result('and the rest of the question');
+  f.push(4);await f.advance(3000);assert.equal(f.requests.length,1,'Whisper pauses again once browser text resumes');
+  assert.equal(f.box.textContent,'First words New spoken words. and the rest of the question');
+  assert.equal(f.submissions.length,0);assert.equal(f.recorders[0].state,'recording');assert.equal(f.stop.disabled,false);
+});
+test('R19: a silent pause is not a stall: no restart and no server transcription',async()=>{
+  const f=fixture({speech:true});await f.api.startRecognition();f.recognizers[0].result('Question so far');
+  f.push(20,0);await f.advance(30000);
+  assert.equal(f.recognizers.length,1);assert.equal(f.requests.length,0);assert.equal(f.box.textContent,'Question so far');
+});
+test('R19: text keeps growing through a long recording until Stop Recording & Answer',async()=>{
+  const f=fixture({speech:true});await f.api.startRecognition();
+  const expected=[];
+  for(let n=0;n<6;n++){
+    const sr=f.recognizers.at(-1);sr.result('part '+n);expected.push('part '+n);
+    if(n%2){sr.end();await f.advance(1000);}            // the browser ends a session
+    else{await f.advance(7000);f.push(2);await f.advance(2000);expected.push('New spoken words.');}  // or stalls
+    await f.advance(1000);
+  }
+  assert.equal(f.box.textContent,expected.join(' '));
+  assert.equal(f.submissions.length,0);assert.equal(f.recorders[0].state,'recording');
+  const rec=f.recorders[0];rec.chunk('a');f.api.stopRecognitionAndSubmit();await rec.stopped;await flush();
+  assert.deepEqual(f.submissions,['Full question including the last spoken sentence.']);
 });
 test('R11: a down KB backend (HTTP 502) falls through to /api/reference/stt',async()=>{
   const urls=[];const f=fixture({noPcm:true,sttFetch:async(url)=>{urls.push(url);return url==='/api/kb/stt'?{ok:false,status:502}:{ok:true,status:200,json:async()=>({text:'Rerouted question'})};}});

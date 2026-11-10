@@ -119,8 +119,8 @@
       },
       {
         "old": "js/25_v105_resume_after_question_mouth_sync.js",
-        "query": "v=R18-20261105",
-        "sha256": "982c1aada3f93e28bcb28af300aa9efd11f31561295e160f9bb40d748352bda9",
+        "query": "v=R19-20261110",
+        "sha256": "ae5648791f38c69e8a70aab7ef4350944258e95a1803a260f02f2e9ac81ecc30",
         "new": "shared/js/speech/recognition-controller.js",
         "previous_sha256": "ecbb7424a024d3b310e8b2ea3407e2d1a932396e866d2e3ef4d34d46a1061ddd"
       },
@@ -416,8 +416,8 @@
       },
       {
         "old": "js/25_v105_resume_after_question_mouth_sync.js",
-        "query": "v=R18-20261105",
-        "sha256": "982c1aada3f93e28bcb28af300aa9efd11f31561295e160f9bb40d748352bda9",
+        "query": "v=R19-20261110",
+        "sha256": "ae5648791f38c69e8a70aab7ef4350944258e95a1803a260f02f2e9ac81ecc30",
         "new": "shared/js/speech/recognition-controller.js",
         "previous_sha256": "6a4c87062a768339c317eb4af48d6356c8f93b3b3c00e00604e9c8e1cf9d95e7"
       },
