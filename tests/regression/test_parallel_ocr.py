@@ -16,6 +16,8 @@ except ImportError:
     raise SystemExit(0)
 os.environ['VQ_OCR_WORKERS'] = '4'
 os.environ['VQ_CPU_WORKERS'] = '4'
+# Isolated student-activity marker: other suites' students must not make this run 'busy'.
+os.environ['VQ_MODEL_PRIORITY_DIR'] = tempfile.mkdtemp(prefix='vq-ocr-quiet-')
 import pdf_ingestion  # noqa: E402
 import pdf_ocr  # noqa: E402
 
@@ -86,6 +88,13 @@ with tempfile.TemporaryDirectory() as temporary:
     again = StandInOCR()
     list(pdf_ingestion.iter_pages(document, 1, pages, folder / 'cache', 'deck', ocr=again, vision=NoVision(), mode='fast'))
     assert again.rendered == []
+    # While students are asking, OCR drops to the busy budget (2).
+    import ollama_cancel
+    ollama_cancel.note_student_activity()
+    busy = StandInOCR()
+    list(pdf_ingestion.iter_pages(document, 1, pages, folder / 'cache-busy', 'deck', ocr=busy, vision=NoVision(), mode='fast'))
+    assert busy.most == min(2, expected), 'OCR did not drop to the busy budget while students were asking (%s)' % busy.most
+    os.unlink(ollama_cancel.ACTIVITY_PATH)
     # One worker: the original page-by-page reading.
     os.environ['VQ_OCR_WORKERS'] = '1'
     single = StandInOCR()
