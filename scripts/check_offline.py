@@ -107,6 +107,7 @@ def main():
         ('Students first: grace period and background timeout', [sys.executable,str(TESTS / 'test_step_scheduling.py')]),
         ('Students and course preparation share the GPU', [sys.executable,str(TESTS / 'test_gpu_sharing.py')]),
         ('Automatic recovery and parallel chapters', [sys.executable,str(TESTS / 'test_automatic_recovery.py')]),
+        ('Restart only the model Ollama for GPU sharing', [sys.executable,str(TESTS / 'test_restart_model_ollama.py')]),
         ("All-course text integrity", [sys.executable,str(TESTS / "test_content_integrity.py")]),
         ("Math integrity", [sys.executable,str(TESTS / "test_math_integrity.py")]),
         ("All-course display", [node,str(TESTS / "test_content_display.cjs")]),

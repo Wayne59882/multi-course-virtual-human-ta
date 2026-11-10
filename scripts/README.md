@@ -12,6 +12,7 @@ The launchers do not automatically load `.env`.
 | `python3 scripts/check_offline.py` | Run offline regression checks, source syntax checks, and documentation-link checks. |
 | `python3 scripts/check_web_assets.py` | Validate local HTML resources and required avatar URL declarations; no network requests. |
 | `bash scripts/start.sh` | Start the complete service; checks prerequisites and restarts existing matching teaching backends. |
+| `python3 scripts/runtime/restart_model_ollama.py` | Restart only the model Ollama with GPU-sharing settings chosen from free GPU memory; the teaching services switch within a minute without a restart. |
 | `bash scripts/setup/prepare_reference.sh` | Check/start the embedding service, download BGE-M3 when needed, and build/check the private textbook index. |
 | `bash scripts/setup/prepare_stt.sh` | Create the expected speech Python environment if absent and install Faster-Whisper. FFmpeg is installed separately. |
 | `bash scripts/setup/prepare_models.sh` | Download the existing Granite, Gemma, and Ministral model tags; Granite is a legacy model rather than a current student-selectable option. |

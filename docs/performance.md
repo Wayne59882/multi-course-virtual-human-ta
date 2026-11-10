@@ -45,9 +45,19 @@ Figure reading is a supplement. It starts a model call only after students
 have been quiet for `VQ_FIGURE_IDLE_SEC` (60 s), and it never holds back
 course publication: text-based Q&A, lectures and practice items go live first.
 
-The private Ollama must be restarted for new capacity values. If it was started
-by an older script, the services assume exclusive mode until it is restarted.
-These settings do not reserve GPU memory against other users' processes.
+The teaching services read these values from the running private Ollama
+process (same Unix user), so only Ollama needs a restart for new values:
+
+```bash
+python3 scripts/runtime/restart_model_ollama.py
+```
+
+It restarts only the model Ollama (not the embedding Ollama), keeps its
+binary, model folder and environment, chooses the values from the GPU memory
+free after it stopped, loads Gemma (and Ministral when two models fit) and
+reports whether each model is fully on the GPU. The services switch within a
+minute. These settings do not reserve GPU memory against other users'
+processes.
 
 ## Automatic recovery
 
