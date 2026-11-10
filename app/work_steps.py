@@ -138,6 +138,9 @@ def completed_call(request, compute):
     key = hashlib.sha256(json.dumps([revision, request], sort_keys=True,
                                    ensure_ascii=False).encode('utf-8')).hexdigest()
     path = directory / (key + '.json')
+    used = getattr(_LOCAL, 'used', None)
+    if used is not None:
+        used.append(key)
     with file_lock(directory / (key + '.lock'), check):
         try:
             entry = json.loads(path.read_text(encoding='utf-8'))
@@ -172,11 +175,31 @@ def clear_steps(directory):
                 pass
 
 
+def steps_mark():
+    """Start recording the steps this thread uses (for reject_steps)."""
+    _LOCAL.used = []
+
+
 def reject_steps():
-    """Forget completed but semantically rejected drafts, not transport failures."""
+    """Forget completed but semantically rejected drafts, not transport failures.
+
+    After steps_mark() only the steps this thread used since then are removed,
+    so chapters prepared in parallel keep their own completed steps.
+    """
     scope=getattr(_LOCAL,'scope',None)
-    if scope is not None:
+    if scope is None:
+        return
+    used=getattr(_LOCAL,'used',None)
+    if used is None:
         clear_steps(scope[0])
+        return
+    directory=scope[0]
+    for key in used:
+        try:
+            (directory/(key+'.json')).unlink()
+        except FileNotFoundError:
+            pass
+    _LOCAL.used=[]
 
 
 def discard_call(request):

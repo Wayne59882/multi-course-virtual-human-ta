@@ -15,8 +15,23 @@ export OLLAMA_MODELS="${OLLAMA_MODELS:-$BASE/ollama-models}"
 export OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:11435}"
 export OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-4096}"
 export VQ_NUM_CTX="${VQ_NUM_CTX:-4096}"
-export OLLAMA_MAX_LOADED_MODELS="${OLLAMA_MAX_LOADED_MODELS:-1}"
-export OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-1}"
+# Match the running private Ollama, or choose from free GPU memory before
+# starting it (scripts/lib/gpu_capacity.sh; app/gpu_policy.py reads these).
+source "$VHTA_SCRIPTS_DIR/lib/gpu_capacity.sh"
+if curl -fsS "http://$OLLAMA_HOST/api/version" >/dev/null 2>&1; then
+  if [[ -f "$BASE/ollama-capacity.env" ]]; then
+    # shellcheck disable=SC1091
+    source "$BASE/ollama-capacity.env"
+  else
+    # Started by an older script: assume one request at a time until it is restarted.
+    export OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-1}"
+    export OLLAMA_MAX_LOADED_MODELS="${OLLAMA_MAX_LOADED_MODELS:-1}"
+    echo '[INFO] Private Ollama was started without capacity settings; restart it to let students and course preparation share the GPU.'
+  fi
+else
+  vq_choose_gpu_capacity
+fi
+export VQ_GPU_SHARING="${VQ_GPU_SHARING:-auto}"
 export VQ_MODEL_KEEP_ALIVE="${VQ_MODEL_KEEP_ALIVE:-30m}"
 export VQ_LOCAL_MAX_WAIT_SEC="${VQ_LOCAL_MAX_WAIT_SEC:-240}"
 export VQ_BATCH_MAX_ITEMS="${VQ_BATCH_MAX_ITEMS:-4}"
@@ -79,6 +94,11 @@ sleep 2
   for _ in $(seq 1 20); do curl -fsS http://127.0.0.1:8182/api/reference/health >/dev/null 2>&1 && break; sleep 1; done
   curl -fsS --max-time 180 -X POST http://127.0.0.1:8182/api/warm-model \
     -H 'Content-Type: application/json' -d '{"model_key":"gemma"}' || true
+  # With room for two models, Ministral is loaded too so its first answer does not wait.
+  if (( ${OLLAMA_MAX_LOADED_MODELS:-1} >= 2 )); then
+    curl -fsS --max-time 180 -X POST http://127.0.0.1:8182/api/warm-model \
+      -H 'Content-Type: application/json' -d '{"model_key":"mistral"}' || true
+  fi
 ) > logs/default_model_warm.log 2>&1 &
 echo $! > logs/default_model_warm.pid
 echo '[OK] Query Knowledge Base backend: 127.0.0.1:8181 (Local LLM only)'

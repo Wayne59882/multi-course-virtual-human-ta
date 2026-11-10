@@ -23,6 +23,7 @@ from http.server import SimpleHTTPRequestHandler
 from pathlib import Path
 from static_assets import SharedAssetsMixin
 from model_lock import SharedModelLock
+import gpu_policy
 from feedback.feedback_service import find_correction
 try:
     from http.server import ThreadingHTTPServer
@@ -598,7 +599,8 @@ def run_selected_chat(server, model_key, messages, options, timeout, json_format
 
         previous = server.active_model_tag
         previous_base = getattr(server, "active_model_base", None)
-        if previous and (previous != tag or previous_base != base):
+        # Keep both models loaded when the GPU has room (see gpu_policy).
+        if previous and (previous != tag or previous_base != base) and not gpu_policy.keep_models_loaded():
             ollama_unload(previous, previous_base)
             server.active_model_tag = None
             server.active_model_key = None

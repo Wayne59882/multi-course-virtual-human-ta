@@ -352,8 +352,9 @@ reliability, or learning effectiveness.
 
 ---
 
-The [performance guide](docs/performance.md) explains chapter pipelining, completed-step
-recovery, CPU work budgets and measurements on the actual teaching server.
+The [performance guide](docs/performance.md) explains how students and course preparation
+share the GPU, parallel chapter preparation, automatic recovery, chapter pipelining,
+completed-step recovery, CPU work budgets and measurements on the actual teaching server.
 
 ## Troubleshooting
 

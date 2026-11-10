@@ -3,9 +3,12 @@
 * Student Q&A workers enter a CancellationScope: a model switch closes only
   that request's own socket.
 * Background course work (PDF reading, lectures, questions) runs inside
-  BackgroundWork. It yields the GPU whenever a student answer is waiting:
-  completed steps are saved before the lock is released. Immediate stream
-  preemption is optional; deletion and explicit cancellation remain immediate.
+  BackgroundWork. How it shares the GPU with students is decided by
+  gpu_policy: in concurrent mode both run at once; in exclusive mode a running
+  step gets a short grace period when a student is waiting and is then
+  interrupted (completed steps are saved). Deletion and explicit cancellation
+  remain immediate. Figure reading (idle_only) starts only while no student
+  has asked recently.
 * Student answers publish a PriorityClaim file so the KB and Reference
   processes see each other's waiting students.
 """
@@ -17,8 +20,10 @@ import threading
 import time
 import uuid
 from urllib.parse import urlsplit
+import gpu_policy
 
 PRIORITY_DIR = os.environ.get('VQ_MODEL_PRIORITY_DIR', '/tmp/vq_ollama_priority')
+ACTIVITY_PATH = PRIORITY_DIR.rstrip('/') + '.last-student'
 PREEMPT_POLL_SEC = 0.25
 CLAIM_MAX_AGE_SEC = 1800
 # Ollama reloads a model whenever num_ctx changes between requests, so every
@@ -44,6 +49,31 @@ def current_scope():
 
 def background_active():
     return bool(getattr(_LOCAL, 'background', False))
+
+
+def background_idle_only():
+    return bool(getattr(_LOCAL, 'background_idle_only', False))
+
+
+def note_student_activity():
+    """Record that a student used the model (seen by every server process)."""
+    try:
+        with open(ACTIVITY_PATH, 'w') as stream:
+            stream.write('%.3f' % time.time())
+    except OSError:
+        pass
+
+
+def seconds_since_student():
+    try:
+        return max(0.0, time.time() - os.path.getmtime(ACTIVITY_PATH))
+    except OSError:
+        return float('inf')
+
+
+def student_recently_active(window=None):
+    window = gpu_policy.idle_seconds() if window is None else float(window)
+    return priority_waiting() or seconds_since_student() < window
 
 
 def background_check():
@@ -115,22 +145,25 @@ class BackgroundWork(object):
     check() may raise (for example when the course was deleted) and is called
     while waiting for the model and while streaming.
     """
-    def __init__(self, check=None, rank=None):
+    def __init__(self, check=None, rank=None, idle_only=False):
         self.check = check
         self.rank = rank  # callable: lower sorts first in the background queue
+        self.idle_only = bool(idle_only)  # start model calls only while no student is asking
         self._previous = None
 
     def __enter__(self):
         self._previous = (getattr(_LOCAL, 'background', False), getattr(_LOCAL, 'background_check', None),
-                          getattr(_LOCAL, 'background_rank', None))
+                          getattr(_LOCAL, 'background_rank', None), getattr(_LOCAL, 'background_idle_only', False))
         _LOCAL.background = True
         _LOCAL.background_check = self.check
+        _LOCAL.background_idle_only = self.idle_only
         if self.rank is not None:
             _LOCAL.background_rank = self.rank
         return self
 
     def __exit__(self, *args):
-        _LOCAL.background, _LOCAL.background_check, _LOCAL.background_rank = self._previous
+        (_LOCAL.background, _LOCAL.background_check, _LOCAL.background_rank,
+         _LOCAL.background_idle_only) = self._previous
         return False
 
 
@@ -159,9 +192,12 @@ def priority_waiting():
         path = os.path.join(PRIORITY_DIR, name)
         try:
             pid = int(name.split('-', 1)[0])
+        except ValueError:
+            continue  # not a claim (for example a lock file kept in the same folder)
+        try:
             if _process_alive(pid) and now - os.path.getmtime(path) < CLAIM_MAX_AGE_SEC:
                 return True
-        except (ValueError, OSError):
+        except OSError:
             pass
         try:
             os.unlink(path)  # stale claim of a stopped process
@@ -185,6 +221,7 @@ class PriorityClaim(object):
             self.path = path
         except OSError:
             self.path = None
+        note_student_activity()
         return self
 
     def __exit__(self, *args):
@@ -194,6 +231,7 @@ class PriorityClaim(object):
             except OSError:
                 pass
         self.path = None
+        note_student_activity()
         return False
 
 
@@ -277,9 +315,11 @@ def stream_chat_json(url, payload, timeout):
         raise RuntimeError('Streaming chat requires a cancellation scope or background work')
     if scope is not None:
         scope.check()
+    # Exclusive mode only: students and preparation cannot run together.
+    grace = None if not background or gpu_policy.concurrent() else gpu_policy.grace_seconds()
     if background:
         background_check()
-        if os.environ.get('VQ_BACKGROUND_PREEMPT','boundary')=='immediate' and priority_waiting():
+        if grace == 0 and priority_waiting():
             raise BackgroundPreempted('A student answer is waiting for the model')
     conn, path = _connection(url, timeout)
     stop = threading.Event()
@@ -293,14 +333,20 @@ def stream_chat_json(url, payload, timeout):
         if background:
             began=time.monotonic()
             deadline=max(1,float(os.environ.get('VQ_BACKGROUND_STEP_TIMEOUT_SEC','300')))
+            waiting_since=[None]
             def watch():
                 while not stop.wait(PREEMPT_POLL_SEC):
                     try:
                         background_check()
                         if time.monotonic()-began>deadline:
                             reason['error']=TimeoutError('Background model step exceeded its wall-clock limit')
-                        elif os.environ.get('VQ_BACKGROUND_PREEMPT','boundary')=='immediate' and priority_waiting():
-                            reason['preempted'] = True
+                        elif grace is not None and priority_waiting():
+                            # A short grace period lets an almost finished step complete.
+                            if waiting_since[0] is None:waiting_since[0]=time.monotonic()
+                            if time.monotonic()-waiting_since[0]>=grace:
+                                reason['preempted'] = True
+                        else:
+                            waiting_since[0]=None
                     except Exception as error:  # deleted course etc.
                         reason['error'] = error
                     if reason:

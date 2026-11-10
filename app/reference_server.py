@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import print_function
 from work_steps import completed_call, metric, model_signature
+import gpu_policy
 from math_integrity import protect_math, restore_math, loads_model_json
 from content_integrity import clean_course_text, SOURCE_RULE
 import argparse, json, os, re, threading, time, urllib.request, uuid
@@ -221,6 +222,9 @@ def ollama_unload(tag,base=None):
         pass
 
 def ensure_single_active_model(server,key,tag,base):
+    # With enough free GPU memory Gemma and Ministral stay loaded together, so
+    # a student answer and course preparation never unload each other's model.
+    if gpu_policy.keep_models_loaded():return
     previous=getattr(server,'active_model_tag',None)
     previous_base=getattr(server,'active_model_base',None)
     if previous and (previous!=tag or previous_base!=base):

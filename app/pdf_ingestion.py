@@ -12,7 +12,7 @@ import re
 import time
 from content_integrity import extract_page, text_issues
 from work_steps import atomic_json
-from cpu_budget import cpu_workers, cpu_bound
+from cpu_budget import cpu_workers, cpu_workers_idle, cpu_bound
 from pdf_ocr import LocalOCR
 from pdf_vision import LocalVision,teaching_images
 
@@ -123,8 +123,9 @@ def inspect_page(page,number,ocr=None,activity=None,vision=None,mode=None):
     return row
 
 def ocr_workers():
-    """Tesseract processes run at once while reading scanned pages (one CPU thread each)."""
-    try:return min(cpu_workers(),max(1,int(os.environ.get('VQ_OCR_WORKERS',str(cpu_workers())))))
+    """OCR threads for scanned pages (one CPU thread each). The shared CPU budget
+    (cpu_budget) lets 4 of them work while students are quiet and 2 while they ask."""
+    try:return min(cpu_workers_idle(),max(1,int(os.environ.get('VQ_OCR_WORKERS',str(cpu_workers_idle())))))
     except ValueError:return 1
 
 

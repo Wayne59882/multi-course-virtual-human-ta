@@ -63,7 +63,7 @@ assert manager._rank('old', 'build') < manager._rank('new', 'text')
 manager.viewed('old')
 assert manager._rank('old', 'text') < manager._rank('new', 'text') and manager._rank('old', 'image') > manager._rank('new', 'text')
 runtime = (ROOT / 'app/course_runtime.py').read_text(encoding='utf-8')
-assert "self._background(cid,'image' if task[1]=='figures' else 'text')" in runtime
+assert "self._background(cid,'image' if task[1]=='figures' else 'text',idle_only=task[1]=='figures')" in runtime
 assert "with self._background(cid,'image'):self._repair_sources(cid)" in runtime
 assert 'self.build_slots,self._background(cid):self._repair_sources' not in runtime
 assert "with self._background(course_id,'build'):" in runtime

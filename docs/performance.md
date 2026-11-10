@@ -16,36 +16,85 @@ metadata, output budget and an explicit cache revision. Interrupted calls are
 not stored as complete. Semantic rejection invalidates the relevant drafts;
 transport failures leave completed steps available for another attempt.
 
-By default a background model call finishes before yielding to a waiting
-student. Vision transcription and pixel review release the shared GPU lock
-between calls. Student cancellation, course deletion and a bounded background
-wall-clock timeout can still interrupt a call. The unfinished call may need to
-run again; token-level model-state restoration is not provided. Aging admits
-long-waiting background work; it does not reserve GPU time against other users'
-independent applications.
+## Sharing the GPU between students and preparation
+
+`scripts/lib/gpu_capacity.sh` chooses the private Ollama's parallel request
+count and loaded-model count from the GPU memory that is free when Ollama
+starts (`app/gpu_policy.py` reads the same values):
+
+| Free GPU memory | Ollama requests at once | Models kept loaded | Mode |
+|---|---|---|---|
+| at least `VQ_GPU_FULL_MIB` (20000 MiB) | 3 | 2 | concurrent: a student plus two preparation steps |
+| at least `VQ_GPU_SHARED_MIB` (14000 MiB) | 2 | 2 | concurrent: a student plus one preparation step |
+| less | 1 | 1 | exclusive |
+
+In concurrent mode a student answer has its own request slot and starts while
+course preparation is generating; preparation is not interrupted and uses the
+remaining slots, so several chapters' lectures are written at once. Gemma and
+Ministral stay loaded together, so a student using Ministral while Gemma
+prepares a course does not unload either model.
+
+In exclusive mode one request runs at a time. A waiting student always goes
+first: preparation does not start, and a running preparation step gets
+`VQ_BACKGROUND_GRACE_SEC` (12 s) to finish before it is interrupted.
+Completed steps are saved, so only the interrupted step runs again. Preparation
+never moves ahead of a waiting student. Course deletion and the background
+wall-clock timeout still interrupt a call immediately.
+
+Figure reading is a supplement. It starts a model call only after students
+have been quiet for `VQ_FIGURE_IDLE_SEC` (60 s), and it never holds back
+course publication: text-based Q&A, lectures and practice items go live first.
+
+The private Ollama must be restarted for new capacity values. If it was started
+by an older script, the services assume exclusive mode until it is restarted.
+These settings do not reserve GPU memory against other users' processes.
+
+## Automatic recovery
+
+A rejected lecture draft (not mainly Traditional Chinese, unreadable symbols,
+unsupported claims) is followed by a differently asked draft: a shorter evenly
+spaced excerpt and a tighter five-paragraph structure. While later chapters are
+still being extracted, a chapter that failed every variant waits for the final
+pass instead of being retried after each new chapter; it gets one more full set
+of variants on the final pass. The lecture output limit is
+`VQ_LECTURE_MAX_TOKENS` (2000) so normal lectures are not cut off. Review gates
+are unchanged: nothing that fails review is published.
+
+Figure pages are read as the cropped graphical region, then the whole page,
+then the top and bottom halves of the page, each with the independent pixel
+review. A page that no variant can verify with the installed model is not read
+again until the model or PDF changes; its text remains in course Q&A. Pages
+interrupted by a model or connection failure are read once more in the same
+pass and again after a restart.
+
+Chapters without enough readable text are read again automatically, once,
+after the course's other preparation finishes (OCR, then the vision model).
 
 Text-rich pages with a bounded graphical region can be cropped for visual
 reading. Every embedded image and vector drawing is included, with margins for
 captions. Scans, unreadable text and unsupported APIs retain the full page.
-Independent pixel review is retained. The image preparation progress row is
-removed from the teaching interface; image processing and diagnostics continue.
+The image preparation progress row is removed from the teaching interface;
+image processing and diagnostics continue.
 
 ## Resource configuration
 
-The GPU model lock remains one request across the teaching services. This is a
-conservative shared-GPU policy, not a measured optimum or a GPU reservation.
 CPU OCR rendering/recognition and course embedding requests share a process-wide
 and cross-process slot budget. Tesseract and embedding calls use one internal
 CPU thread. PDF documents are not passed into OCR threads.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `VQ_CPU_WORKERS` | Smaller of 2 and available CPU cores | Combined CPU-heavy task slots; constrained by CPU affinity and cgroup quota. |
-| `VQ_CPU_SLOT_DIR` | Per-user directory under the system temporary directory | Same slot directory and limit must be used by all teaching services. |
-| `VQ_OCR_WORKERS` | CPU work budget | OCR workers, capped by the combined CPU budget. Prefetch is at most twice this count. |
-| `VQ_BACKGROUND_PREEMPT` | `boundary` | Finish the current step before yielding. `immediate` restores immediate student preemption. |
-| `VQ_BACKGROUND_MAX_WAIT_SEC` | `120` | Age waiting background work to reduce starvation within this application. |
+| `VQ_GPU_SHARING` | `auto` | `concurrent` or `exclusive` overrides the choice from Ollama's capacity. |
+| `OLLAMA_NUM_PARALLEL`, `OLLAMA_MAX_LOADED_MODELS` | chosen from free GPU memory | Explicit values override the automatic choice. |
+| `VQ_BACKGROUND_MODEL_SLOTS` | Ollama requests minus student slots | Preparation steps at once in concurrent mode. |
+| `VQ_CPU_WORKERS` | Smaller of 4 and available CPU cores | CPU-heavy task slots while no student is asking; constrained by CPU affinity and cgroup quota. |
+| `VQ_CPU_WORKERS_BUSY` | 2 | CPU-heavy task slots while students are asking (within `VQ_CPU_BUSY_WINDOW_SEC`, 60 s). |
+| `VQ_CPU_SLOT_DIR` | Per-user directory under the system temporary directory | Same slot directory and limits must be used by all teaching services. |
+| `VQ_OCR_WORKERS` | `VQ_CPU_WORKERS` | OCR threads, capped by the CPU budget. Prefetch is at most twice this count. |
+| `VQ_BACKGROUND_PREEMPT` | `grace` | Exclusive mode: `grace` interrupts after `VQ_BACKGROUND_GRACE_SEC`; `immediate` at once; `boundary` never. |
+| `VQ_FIGURE_IDLE_SEC` | `60` | Student quiet time before figure reading starts a model call. |
 | `VQ_BACKGROUND_STEP_TIMEOUT_SEC` | `300` | Background streaming-call wall-clock limit; completed earlier steps remain saved. |
+| `VQ_LECTURE_MAX_TOKENS` | `2000` | Lecture output limit (the prompt still asks for five to seven paragraphs). |
 | `VQ_STEP_CACHE_REVISION` | `1` | Change to invalidate model-step keys after operator-controlled configuration changes. |
 
 Metadata is read once per preparation scope. When replacing weights or changing
@@ -83,6 +132,8 @@ student Q&A latency, RAM/VRAM, first-chapter readiness and total preparation
 time before applying a candidate. Record cache state and model configuration.
 
 Offline regressions exercise concurrent checkpoints, a process interrupted
-during review, partial-ingestion recovery, chapter publication, queue aging,
-step timeouts and the preparation UI. They do not establish a production
-speedup on the laboratory's shared GPU.
+during review, partial-ingestion recovery, chapter publication, student and
+preparation GPU sharing, the exclusive-mode grace period, quiet-time figure
+reading, automatic recovery, step timeouts and the preparation UI. They use a
+stand-in model server and do not establish a production speedup or the VRAM
+fit of two models on the laboratory's shared GPU.

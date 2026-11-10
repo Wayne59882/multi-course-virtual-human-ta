@@ -1,7 +1,11 @@
 """One CPU-heavy work budget shared by this deployment's processes.
 
-This cannot reserve resources against other users on the host. All services
-must use the same VQ_CPU_WORKERS and VQ_CPU_SLOT_DIR. GPU inference is separate.
+OCR and course embeddings use up to VQ_CPU_WORKERS slots (default 4) while no
+student is asking, and VQ_CPU_WORKERS_BUSY slots (default 2) while students
+are active, so reading scanned pages never slows their answers. Both are
+capped by the CPUs this process may use. This cannot reserve resources
+against other users on the host. All services must use the same settings and
+VQ_CPU_SLOT_DIR. GPU inference is separate.
 """
 import functools
 import os
@@ -37,13 +41,30 @@ def available_cpus():
     return max(1, int(count))
 
 
-def cpu_workers():
-    available = available_cpus()
+def _requested(name, default):
     try:
-        requested = int(os.environ.get('VQ_CPU_WORKERS', str(min(2, available))))
+        return int(os.environ.get(name, str(default)))
     except ValueError:
-        requested = 1
-    return max(1, min(requested, available))
+        return 1
+
+
+def cpu_workers_idle():
+    """Most CPU-heavy tasks at once (while no student is asking)."""
+    available = available_cpus()
+    return max(1, min(_requested('VQ_CPU_WORKERS', 4), available))
+
+
+def cpu_workers():
+    """CPU-heavy tasks allowed right now: fewer while students are active."""
+    idle = cpu_workers_idle()
+    try:
+        from ollama_cancel import student_recently_active
+        busy = student_recently_active(float(os.environ.get('VQ_CPU_BUSY_WINDOW_SEC', '60')))
+    except Exception:
+        busy = False
+    if not busy:
+        return idle
+    return max(1, min(idle, _requested('VQ_CPU_WORKERS_BUSY', 2)))
 
 
 @contextmanager

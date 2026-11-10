@@ -1,0 +1,170 @@
+"""Course preparation recovers by itself instead of asking the teacher.
+
+* A rejected lecture draft is followed by a differently asked draft; several
+  chapters are written at once when the GPU allows it.
+* A chapter that failed every variant is not retried after each newly
+  published chapter, only once more on the final pass.
+* Figure pages: the cropped reading, then the whole page, then page halves.
+  A page no variant can verify is not read again with the same model, and the
+  figure step still finishes as ready (figures never hold the course back).
+* Chapters without readable text are read again automatically, once.
+* OCR uses 4 CPU slots while students are quiet and 2 while they ask.
+"""
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+import threading
+import time
+from unittest.mock import patch
+
+ROOT=Path(__file__).resolve().parents[2]
+sys.path.insert(0,str(ROOT/'app'))
+os.environ['VQ_PDF_OCR']='off'
+os.environ['VQ_PDF_VISION']='off'
+os.environ['VQ_MODEL_PRIORITY_DIR']=tempfile.mkdtemp(prefix='vq-recovery-')
+try:
+    import fitz
+except ImportError:
+    print('SKIP automatic recovery: PyMuPDF is not installed')
+    raise SystemExit(0)
+import course_runtime as cr
+import cpu_budget
+import ollama_cancel as oc
+import pdf_vision
+
+CHINESE='肺泡通氣量與血流量的比例決定氣體交換的效率。'*12
+CONCURRENT={'OLLAMA_NUM_PARALLEL':'3','OLLAMA_MAX_LOADED_MODELS':'2','VQ_GPU_SHARING':'auto'}
+
+
+def build_course(folder,manager,units_count=3):
+    document=fitz.open()
+    for i in range(units_count):
+        page=document.new_page()
+        page.insert_textbox(fitz.Rect(40,40,550,700),
+                            ('Ventilation and perfusion are matched in healthy lungs. Chapter %d explains the oxygen gradient. '%i)*8)
+    source=folder/'source.pdf';document.save(source);document.close()
+    stage=manager.inspect([('source.pdf',source)],course_name='Respiration')
+    name=stage['sources'][0]['file_name']
+    units=[{'id':'unit%d'%i,'title':'Respiration %d'%i,'source_title':'Respiration','source_file':name,
+            'start_page':i,'end_page':i} for i in range(1,units_count+1)]
+    manager._start_preparation=lambda *args,**kwargs:None
+    with patch.object(cr,'_resolve_course_name',return_value=('Respiration','teacher')):
+        manager._build_impl('fixture',stage,units,'course','Respiration','none','gemma',lambda *args:'')
+    del manager._start_preparation
+    return manager.manifest('course')
+
+
+with tempfile.TemporaryDirectory() as temporary:
+    folder=Path(temporary)
+    cr.COURSE_ROOT=folder/'courses';cr.STAGING_ROOT=cr.COURSE_ROOT/'_staging';cr.STAGING_ROOT.mkdir(parents=True)
+    manager=cr.CourseManager()
+    build_course(folder,manager)
+
+    # -- lectures: escalation and parallel chapters -------------------------
+    guard=threading.Lock();seen={'active':0,'peak':0,'calls':[],'budgets':set()}
+    def model_call(key,system,user,budget):
+        unit=next(name for name in ('Respiration 1','Respiration 2','Respiration 3') if name in user)
+        with guard:
+            seen['active']+=1;seen['peak']=max(seen['peak'],seen['active'])
+            seen['calls'].append((unit,'5 至 7 段' in user));seen['budgets'].add(budget)
+        try:
+            time.sleep(.15)
+            if unit=='Respiration 3':return 'English only draft. '*20      # never acceptable
+            if '5 至 7 段' in user:return 'English only draft. '*20         # first variant rejected
+            return CHINESE
+        finally:
+            with guard:seen['active']-=1
+    with patch.dict(os.environ,CONCURRENT),patch.object(cr,'review_text',lambda kind,script,*a,**k:(script,{})):
+        with cr.BackgroundWork():
+            manager._prepare_lectures('course','gemma',model_call)
+    units={u['id']:u for u in manager.manifest('course')['units']}
+    assert units['unit1']['script_status']=='ready' and units['unit1']['script_variant']==1
+    assert units['unit2']['script_status']=='ready' and CHINESE in units['unit2']['script']
+    assert units['unit3']['script_status']=='error' and units['unit3']['script_attempts']==1
+    assert seen['budgets']=={cr.LECTURE_MAX_TOKENS} and cr.LECTURE_MAX_TOKENS==2000
+    assert sum(1 for unit,_ in seen['calls'] if unit=='Respiration 3')==len(cr.LECTURE_VARIANTS)
+    assert seen['peak']==2,'two chapters should be written at once (peak %s)'%seen['peak']
+
+    def lecture_calls():
+        seen['calls'].clear()
+        with patch.object(cr,'review_text',lambda kind,script,*a,**k:(script,{})):
+            manager._prepare_lectures('course','gemma',model_call)
+        return len(seen['calls'])
+    # While chapters are still arriving, the failed chapter is not retried.
+    manager._update_manifest('course',lambda m:m.update(ingestion_complete=False))
+    assert lecture_calls()==0
+    # Final pass: one more full set of variants, then it stops.
+    manager._update_manifest('course',lambda m:m.update(ingestion_complete=True))
+    assert lecture_calls()==len(cr.LECTURE_VARIANTS)
+    assert manager.manifest('course')['units'][2]['script_attempts']==2
+    assert lecture_calls()==0
+
+    # -- automatic re-reading of chapters without readable text -------------
+    launched=[]
+    manager._launch_repair=lambda cid,key,call:launched.append(cid)
+    manager._update_manifest('course',lambda m:m['units'][2].update(script_needs_source=True))
+    manager._auto_repair('course','gemma',model_call);manager._auto_repair('course','gemma',model_call)
+    assert launched==['course'],'the source pages are read again once, automatically'
+
+    # -- figure pages: reading variants -------------------------------------
+    document=fitz.open();page=document.new_page()
+    page.insert_textbox(fitz.Rect(40,40,550,200),'Oxygen diffuses from alveoli into pulmonary capillary blood. '*6)
+    page.draw_rect(fitz.Rect(100,300,400,520),color=(0,0,0))
+    vision=pdf_vision.LocalVision();vision.checked=True;vision.error=''
+    assert pdf_vision.visual_clip(page) is not None
+    order=[]
+    def transcribe(results):
+        def run(image,requests):
+            order.append(len(image));outcome=results.pop(0)
+            if isinstance(outcome,Exception):raise outcome
+            return outcome,0,False
+        return run
+    with patch.object(vision,'_transcribe',transcribe([[],['Alveolar oxygen 100 mmHg']])):
+        result=vision.read(page)
+    assert result['ok'] and result['variant']=='page' and len(order)==2
+    order.clear()
+    with patch.object(vision,'_transcribe',transcribe([[],[],['top half table'],[]])):
+        result=vision.read(page)
+    assert result['ok'] and result['variant']=='halves' and result['text']=='top half table' and len(order)==4
+    with patch.object(vision,'_transcribe',transcribe([[],[],[],[]])):
+        result=vision.read(page)
+    assert not result['ok'] and result['exhausted'] is True
+    with patch.object(vision,'_transcribe',transcribe([RuntimeError('Ollama HTTP 500')])):
+        result=vision.read(page)
+    assert not result['ok'] and result['exhausted'] is False,'a model/connection failure is read again later'
+    document.close()
+
+    # -- figure step: exhausted pages are not read again; never an error ----
+    reads=[]
+    class StandInVision(object):
+        fingerprint='stand-in';error=''
+        def probe(self):return True
+        def read(self,page):
+            reads.append(page.number+1)
+            if page.number==0:return {'ok':False,'error':'no verifiable content','exhausted':True}
+            return {'ok':True,'text':'Figure: the oxygen gradient falls from alveolus to capillary blood.'}
+    manager._update_manifest('course',lambda m:m.update(figure_pages=[
+        {'unit_id':'unit1','source_file':m['sources'][0]['file_name'],'page':1},
+        {'unit_id':'unit2','source_file':m['sources'][0]['file_name'],'page':2}]))
+    manager._wait_for_lectures=lambda cid:None
+    manager._index_missing_chunks=lambda cid:0
+    manager._drop_indexed_chunks=lambda cid,ids=None:None
+    with patch.object(cr,'LocalVision',StandInVision):
+        manager._prepare_figures('course','gemma',model_call)
+        figures=manager.manifest('course')['preparation']['figures']
+        assert figures['status']=='ready' and figures['pages_read']==1 and figures['pages_unverified']==1,figures
+        assert reads==[1,2]
+        reads.clear();manager._prepare_figures('course','gemma',model_call)
+        assert reads==[],'pages are not read again with the same model'
+
+    # -- OCR: 4 at once while quiet, 2 while students ask -------------------
+    with patch.object(cpu_budget,'available_cpus',lambda:8),patch.dict(os.environ,{'VQ_CPU_WORKERS':'4','VQ_CPU_WORKERS_BUSY':'2','VQ_CPU_BUSY_WINDOW_SEC':'5'}):
+        quiet=Path(oc.ACTIVITY_PATH)
+        if quiet.exists():quiet.unlink()
+        assert cpu_budget.cpu_workers()==4
+        oc.note_student_activity()
+        assert cpu_budget.cpu_workers()==2
+        with patch.dict(os.environ,{'VQ_CPU_BUSY_WINDOW_SEC':'0'}):assert cpu_budget.cpu_workers()==4
+print('PASS automatic recovery: rejected lectures are asked differently, chapters prepare in parallel, failed chapters wait for the final pass, figures try crop/page/halves and never block, unreadable chapters re-read once, OCR 4 quiet / 2 busy')

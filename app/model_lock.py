@@ -1,93 +1,161 @@
-"""Shared answer/vision-model lock for KB and uploaded courses (Python 3.6).
+"""Shared answer/vision-model slots for KB and uploaded courses (Python 3.6).
 
-One GPU model runs at a time across the KB and Reference processes. Student
-answers have priority: while one waits, background course preparation does
-not normally start a new model call. Running steps finish and checkpoint
-before yielding; immediate preemption remains an explicit opt-in. Background calls
-wait in rank order (ollama_cancel.BackgroundWork rank).
+Every model call across the KB and Reference processes holds a slot file.
+Students and course preparation have separate slots (see gpu_policy):
+
+* concurrent mode: a student answer never waits for preparation. Preparation
+  uses its own slots (several chapters at once) while students keep theirs.
+* exclusive mode: one model call at a time on the GPU. Students go first;
+  preparation does not start while a student waits, and a running step is
+  interrupted after a short grace period (ollama_cancel.stream_chat_json).
+
+Preparation never moves ahead of a waiting student. Background calls wait in
+rank order (ollama_cancel.BackgroundWork rank); figure reading starts only
+while no student has asked recently.
 """
 import os
 import threading
 import time
+import gpu_policy
 from work_steps import metric
-from ollama_cancel import (current_scope, background_active, background_check,
-                           priority_waiting, PriorityClaim, Waiting)
+from ollama_cancel import (current_scope, background_active, background_check, background_idle_only,
+                           priority_waiting, student_recently_active, PriorityClaim, Waiting)
 try:
     import fcntl
 except ImportError:
     fcntl=None
 
+_FALLBACK=threading.Lock()  # platforms without flock: one call at a time
+
+
+class _Held(object):
+    def __init__(self):
+        self.files=[];self.claim=None;self.fallback=False
+
 
 class SharedModelLock:
     def __init__(self,path=None):
         self.path=path or os.environ.get('VQ_SHARED_MODEL_LOCK','/tmp/vq_ollama_answer.lock')
-        self.thread_lock=threading.Lock();self.fp=None;self._claim=None
+        self._local=threading.local()
 
-    def _acquire(self,scope,background):
-        started=time.monotonic()
-        def check():
-            if scope is not None:scope.check()
-            if background:background_check()
-        if scope is None and not background:
-            self.thread_lock.acquire()
-        else:
-            while not self.thread_lock.acquire(timeout=0.05):check()
+    # -- slot files -------------------------------------------------------
+    def _open(self,path):
+        directory=os.path.dirname(os.path.abspath(path))
+        if directory and not os.path.isdir(directory):os.makedirs(directory,exist_ok=True)
+        return open(path,'a+')
+
+    def _try(self,path):
+        stream=self._open(path)
         try:
-            check()
-            self.fp=open(self.path,'a+')
-            if fcntl is not None:
-                if scope is None and not background:
-                    fcntl.flock(self.fp.fileno(),fcntl.LOCK_EX)
-                else:
-                    while True:
-                        check()
-                        try:
-                            fcntl.flock(self.fp.fileno(),fcntl.LOCK_EX | fcntl.LOCK_NB)
-                            break
-                        except BlockingIOError:
-                            time.sleep(0.05)
+            fcntl.flock(stream.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+            return stream
+        except BlockingIOError:
+            stream.close();return None
+
+    def _try_any(self,kind,count):
+        for index in range(count):
+            stream=self._try('%s.%s.%d'%(self.path,kind,index))
+            if stream is not None:return stream
+        return None
+
+    def _wait_any(self,kind,count,check):
+        while True:
+            if check:check()
+            stream=self._try_any(kind,count)
+            if stream is not None:return stream
+            time.sleep(0.05)
+
+    def _wait_gpu(self,check,blocking):
+        if blocking:
+            stream=self._open(self.path)
+            fcntl.flock(stream.fileno(),fcntl.LOCK_EX)
+            return stream
+        while True:
+            if check:check()
+            stream=self._try(self.path)
+            if stream is not None:return stream
+            time.sleep(0.05)
+
+    def _release(self,held):
+        for stream in reversed(held.files):
+            try:
+                fcntl.flock(stream.fileno(),fcntl.LOCK_UN)
+            except (OSError,ValueError):
+                pass
+            finally:
+                stream.close()
+        held.files=[]
+        if held.fallback:
+            held.fallback=False;_FALLBACK.release()
+
+    # -- student answers --------------------------------------------------
+    def _enter_student(self,held):
+        scope=current_scope()
+        check=scope.check if scope is not None else None
+        held.claim=PriorityClaim().__enter__()  # every process now sees a waiting student
+        started=time.monotonic()
+        try:
+            if fcntl is None:
+                while not _FALLBACK.acquire(timeout=0.05):
+                    if check:check()
+                held.fallback=True
+            else:
+                held.files.append(self._wait_any('student',gpu_policy.student_slots(),check))
+                if not gpu_policy.concurrent():
+                    held.files.append(self._wait_gpu(check,blocking=check is None))
             metric('model_lock_wait_seconds',time.monotonic()-started)
         except BaseException:
-            if self.fp:self.fp.close()
-            self.fp=None;self.thread_lock.release();raise
+            self._release(held);held.claim.__exit__();held.claim=None;raise
 
-    def _release(self):
-        try:
-            if self.fp is not None:
-                if fcntl is not None:fcntl.flock(self.fp.fileno(),fcntl.LOCK_UN)
-                self.fp.close()
-        finally:self.fp=None;self.thread_lock.release()
+    # -- course preparation -----------------------------------------------
+    def _blocked(self,turn):
+        if not gpu_policy.concurrent() and priority_waiting():return True   # students first
+        if background_idle_only() and student_recently_active():return True  # figures wait for quiet
+        return turn.paused() or not turn.first()
+
+    def _try_background(self,held):
+        if fcntl is None:
+            if not _FALLBACK.acquire(False):return False
+            held.fallback=True;return True
+        slot=self._try_any('background',gpu_policy.background_slots())
+        if slot is None:return False
+        held.files.append(slot)
+        if not gpu_policy.concurrent():
+            gpu=self._try(self.path)
+            if gpu is None:
+                self._release(held);return False
+            held.files.append(gpu)
+        return True
+
+    def _enter_background(self,held):
+        # Background work takes turns by rank (see course_runtime: a course being viewed, then
+        # the newest course; builds, then text, then image reading).
+        with Waiting() as turn:
+            started=time.monotonic()
+            while True:
+                while self._blocked(turn):
+                    background_check();time.sleep(0.2)
+                background_check()
+                if self._try_background(held):
+                    if not self._blocked(turn):
+                        metric('model_lock_wait_seconds',time.monotonic()-started)
+                        metric('background_queue_seconds',time.monotonic()-started)
+                        return
+                    self._release(held)
+                time.sleep(0.05)
 
     def __enter__(self):
-        scope=current_scope();background=background_active()
-        if not background:
-            # A student answer: tell background work in every process to yield.
-            claim=PriorityClaim().__enter__()
-            try:self._acquire(scope,False)
-            except BaseException:
-                claim.__exit__();raise
-            self._claim=claim
-            return self
-        # Background work takes turns by rank (see course_runtime: a course being viewed, then
-        # the newest course; builds, then text, then image reading), not all courses at once.
-        with Waiting() as turn:
-            # Aging allows a waiting background step to finish even under a
-            # continuous stream of questions. This controls only our services.
-            maximum=max(1,float(os.environ.get('VQ_BACKGROUND_MAX_WAIT_SEC','120')))
-            started=time.monotonic()
-            blocked=lambda:(priority_waiting() and time.monotonic()-started<maximum) or turn.paused() or not turn.first()
-            while True:
-                while blocked():
-                    background_check();time.sleep(0.2)
-                self._acquire(None,True)
-                if not blocked():
-                    metric('background_queue_seconds',time.monotonic()-started)
-                    return self
-                self._release();time.sleep(0.05)
+        stack=getattr(self._local,'stack',None)
+        if stack is None:stack=self._local.stack=[]
+        held=_Held()
+        if background_active():self._enter_background(held)
+        else:self._enter_student(held)
+        stack.append(held)
+        return self
 
     def __exit__(self,*args):
-        claim=self._claim;self._claim=None
-        try:self._release()
+        held=self._local.stack.pop()
+        try:self._release(held)
         finally:
-            if claim is not None:claim.__exit__()
+            if held.claim is not None:held.claim.__exit__()
         return False

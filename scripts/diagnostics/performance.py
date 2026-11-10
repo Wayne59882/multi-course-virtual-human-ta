@@ -17,12 +17,16 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'app'))
-from cpu_budget import available_cpus, cpu_workers
+from cpu_budget import available_cpus, cpu_workers, cpu_workers_idle
+import gpu_policy
 
 
 def resources():
-    result = {'available_cpu_cores': available_cpus(), 'configured_cpu_workers': cpu_workers(),
-              'gpu_inference_limit': 1, 'measured_gpu_throughput': False}
+    sharing = gpu_policy.describe()
+    result = {'available_cpu_cores': available_cpus(), 'configured_cpu_workers': cpu_workers_idle(),
+              'cpu_workers_now': cpu_workers(), 'gpu_sharing': sharing,
+              'gpu_inference_limit': sharing['student_slots'] + sharing['background_slots'] if sharing['mode'] == 'concurrent' else 1,
+              'measured_gpu_throughput': False}
     try:
         result['memory'] = {row.split(':')[0]: row.split(':')[1].strip()
                             for row in Path('/proc/meminfo').read_text().splitlines()
