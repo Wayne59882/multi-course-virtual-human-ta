@@ -32,6 +32,13 @@ Deployment scripts are operator tools; the offline checks do not execute a real
 Cloudflare login, Tunnel, or deployment. The launcher regression test substitutes
 external commands in a temporary copy of the project.
 
+## Performance diagnostics
+
+`python3 scripts/diagnostics/performance.py` inspects the host without changing
+services. Use `--pdf /actual/material.pdf --pages 20 --repeats 3` to compare CPU
+worker counts on the teaching server. See the [performance guide](../docs/performance.md)
+for scope, resource limits and interrupted-step recovery.
+
 ## Internal helpers
 
 `runtime/` contains service startup helpers. `lib/paths.sh` defines the repository,

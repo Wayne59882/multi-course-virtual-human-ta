@@ -2,13 +2,14 @@
 
 One GPU model runs at a time across the KB and Reference processes. Student
 answers have priority: while one waits, background course preparation does
-not start a new model call, and a running background stream is interrupted
-(see ollama_cancel.stream_chat_json) and retried afterwards. Background calls
+not normally start a new model call. Running steps finish and checkpoint
+before yielding; immediate preemption remains an explicit opt-in. Background calls
 wait in rank order (ollama_cancel.BackgroundWork rank).
 """
 import os
 import threading
 import time
+from work_steps import metric
 from ollama_cancel import (current_scope, background_active, background_check,
                            priority_waiting, PriorityClaim, Waiting)
 try:
@@ -23,6 +24,7 @@ class SharedModelLock:
         self.thread_lock=threading.Lock();self.fp=None;self._claim=None
 
     def _acquire(self,scope,background):
+        started=time.monotonic()
         def check():
             if scope is not None:scope.check()
             if background:background_check()
@@ -44,6 +46,7 @@ class SharedModelLock:
                             break
                         except BlockingIOError:
                             time.sleep(0.05)
+            metric('model_lock_wait_seconds',time.monotonic()-started)
         except BaseException:
             if self.fp:self.fp.close()
             self.fp=None;self.thread_lock.release();raise
@@ -68,12 +71,18 @@ class SharedModelLock:
         # Background work takes turns by rank (see course_runtime: a course being viewed, then
         # the newest course; builds, then text, then image reading), not all courses at once.
         with Waiting() as turn:
-            blocked=lambda:priority_waiting() or turn.paused() or not turn.first()
+            # Aging allows a waiting background step to finish even under a
+            # continuous stream of questions. This controls only our services.
+            maximum=max(1,float(os.environ.get('VQ_BACKGROUND_MAX_WAIT_SEC','120')))
+            started=time.monotonic()
+            blocked=lambda:(priority_waiting() and time.monotonic()-started<maximum) or turn.paused() or not turn.first()
             while True:
                 while blocked():
                     background_check();time.sleep(0.2)
                 self._acquire(None,True)
-                if not blocked():return self
+                if not blocked():
+                    metric('background_queue_seconds',time.monotonic()-started)
+                    return self
                 self._release();time.sleep(0.05)
 
     def __exit__(self,*args):

@@ -78,7 +78,9 @@ with tempfile.TemporaryDirectory() as temporary:
         list(pdf_ingestion.iter_pages(document, 1, 2, cr._shared_pages(new_stage, 'sha-other'), 'sha-other', ocr=other, vision=Vision(), mode='fast'))
         assert other.calls == 2
         # A page the vision model already read and reviewed is kept even after OCR changed.
-        cache = next((cr.COURSE_ROOT / '_page_cache').glob('*/000001.json'))
+        import hashlib
+        identity=hashlib.sha256((pdf_ingestion.REVISION+'|sha-genomics').encode()).hexdigest()[:24]
+        cache = cr.COURSE_ROOT / '_page_cache' / identity / '000001.json'
         row = json.loads(cache.read_text(encoding='utf-8'))
         row.update({'extraction_method': 'local_vision', 'image_content_read': True, 'ocr_config': 'ocr-before', 'figure_pending': False,
                     'text': 'Reviewed reading of the slide figure.'})

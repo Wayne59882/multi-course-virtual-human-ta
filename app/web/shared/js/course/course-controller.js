@@ -264,7 +264,7 @@ function prepRow(label,state,detail,value,title){
 }
 function renderPrep(note){
   const box=$('v241Prep');if(!box)return;if(!manifest){box.hidden=true;return;}
-  const prep=manifest.preparation||{},units=manifest.units||[],q=prep.questions||{},lec=prep.lectures||{},idx=prep.index||{},fig=prep.figures||{},src=prep.sources||{};
+  const prep=manifest.preparation||{},units=manifest.units||[],q=prep.questions||{},lec=prep.lectures||{},idx=prep.index||{},src=prep.sources||{};
   const pct=(a,b)=>100*Number(a||0)/Math.max(1,Number(b||0));
   const state=st=>st==='ready'?'done':st==='error'?'error':(!st||st==='waiting'||st==='queued'||st==='source_review')?'waiting':'working';
   const stopped='Stopped · use Retry',rows=[];
@@ -275,8 +275,7 @@ function renderPrep(note){
   const total=Number(lec.total_units||units.length),scripts=lec.completed_units!=null?Number(lec.completed_units):units.filter(u=>u.script_status==='ready').length;
   rows.push(prepRow('Chinese lecture scripts',state(lec.status),lec.status==='error'?stopped:`${scripts} / ${total} units`,lec.status==='ready'?100:pct(scripts,total),lec.status==='error'?lec.error:lec.message));
   rows.push(prepRow('Semantic search',state(idx.status),idx.status==='ready'?'Ready':idx.status==='error'?stopped:idx.total?Math.round(pct(idx.completed,idx.total))+'%':'Waiting',idx.status==='ready'?100:pct(idx.completed,idx.total),idx.message));
-  if(fig.total)rows.push(prepRow('Slide images',fig.status==='unavailable'?'waiting':state(fig.status),fig.status==='waiting'?'After lecture scripts':fig.status==='unavailable'?'Skipped':`${Number(fig.completed||0)} / ${fig.total} pages`,fig.status==='ready'?100:pct(fig.completed,fig.total),fig.message));
-  const finished=[q,lec,idx].every(x=>x.status==='ready')&&(!fig.total||['ready','unavailable'].includes(fig.status))&&src.status!=='preparing';
+  const finished=[q,lec,idx].every(x=>x.status==='ready')&&manifest.ingestion_complete!==false&&src.status!=='preparing';
   const others=activity&&Number(activity.other_courses||0)+Number(activity.other_builds||0);
   const line=[note,!finished&&others?'Other courses are also preparing; the model takes turns, and the course open here goes first.':''].filter(Boolean).join(' ');
   box.innerHTML=`<div class="v241-prep-head"><b>${esc(manifest.course_name)}</b><span class="v241-prep-${finished?'done':'working'}">${finished?'Ready':'Preparing'}</span></div>${rows.join('')}${line?`<div class="v241-prep-note">${esc(line)}</div>`:''}`;

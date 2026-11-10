@@ -4,8 +4,8 @@
   that request's own socket.
 * Background course work (PDF reading, lectures, questions) runs inside
   BackgroundWork. It yields the GPU whenever a student answer is waiting:
-  the background stream is closed, the shared lock is released, and the same
-  call is retried after the student answer finishes.
+  completed steps are saved before the lock is released. Immediate stream
+  preemption is optional; deletion and explicit cancellation remain immediate.
 * Student answers publish a PriorityClaim file so the KB and Reference
   processes see each other's waiting students.
 """
@@ -53,6 +53,7 @@ def background_check():
 
 
 _WAITERS = {}
+_WAIT_TIMES = {}
 _WAITERS_LOCK = threading.Lock()
 PAUSED = (1000,)  # a rank at or above this waits until it changes (a course nobody has opened lately)
 
@@ -73,11 +74,13 @@ class Waiting(object):
         self.rank = getattr(_LOCAL, 'background_rank', None)
         with _WAITERS_LOCK:
             _WAITERS[self.key] = self.rank
+            _WAIT_TIMES[self.key] = time.monotonic()
         return self
 
     def __exit__(self, *args):
         with _WAITERS_LOCK:
             _WAITERS.pop(self.key, None)
+            _WAIT_TIMES.pop(self.key, None)
         return False
 
     def paused(self):
@@ -90,14 +93,20 @@ class Waiting(object):
         """True unless another waiting call in this process is ranked strictly better."""
         with _WAITERS_LOCK:
             waiting = list(_WAITERS.items())
+            entered = dict(_WAIT_TIMES)
+        maximum=max(1,float(os.environ.get('VQ_BACKGROUND_MAX_WAIT_SEC','120')))
+        now=time.monotonic()
 
         def value(rank):
             try:
                 return tuple(rank()) if rank is not None else (50,)
             except Exception:
                 return (99,)
-        mine = value(self.rank)
-        return all(not value(rank) < mine or value(rank) >= PAUSED for key, rank in waiting if key is not self.key)
+        def priority(key,rank):
+            since=entered.get(key,now)
+            return (0,since) if now-since>=maximum else (1,value(rank))
+        mine=priority(self.key,self.rank)
+        return all(value(rank)>=PAUSED or not priority(key,rank)<mine for key,rank in waiting if key is not self.key)
 
 
 class BackgroundWork(object):
@@ -270,7 +279,7 @@ def stream_chat_json(url, payload, timeout):
         scope.check()
     if background:
         background_check()
-        if priority_waiting():
+        if os.environ.get('VQ_BACKGROUND_PREEMPT','boundary')=='immediate' and priority_waiting():
             raise BackgroundPreempted('A student answer is waiting for the model')
     conn, path = _connection(url, timeout)
     stop = threading.Event()
@@ -282,11 +291,15 @@ def stream_chat_json(url, payload, timeout):
         if scope is not None:
             scope.attach_socket(sock)
         if background:
+            began=time.monotonic()
+            deadline=max(1,float(os.environ.get('VQ_BACKGROUND_STEP_TIMEOUT_SEC','300')))
             def watch():
                 while not stop.wait(PREEMPT_POLL_SEC):
                     try:
                         background_check()
-                        if priority_waiting():
+                        if time.monotonic()-began>deadline:
+                            reason['error']=TimeoutError('Background model step exceeded its wall-clock limit')
+                        elif os.environ.get('VQ_BACKGROUND_PREEMPT','boundary')=='immediate' and priority_waiting():
                             reason['preempted'] = True
                     except Exception as error:  # deleted course etc.
                         reason['error'] = error

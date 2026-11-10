@@ -352,6 +352,9 @@ reliability, or learning effectiveness.
 
 ---
 
+The [performance guide](docs/performance.md) explains chapter pipelining, completed-step
+recovery, CPU work budgets and measurements on the actual teaching server.
+
 ## Troubleshooting
 
 | Symptom | What to check |

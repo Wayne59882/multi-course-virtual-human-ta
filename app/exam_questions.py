@@ -11,6 +11,8 @@ from math_integrity import loads_model_json, math_issues, question_math_ok, JSON
 from content_integrity import text_issues, question_text_ok, SOURCE_RULE
 from course_grounding import normalize
 
+from work_steps import reject_steps
+
 FIRST_BATCH_SIZE=3  # Unlock a two-question draw after the first review.
 BATCH_SIZE=12
 
@@ -190,6 +192,7 @@ def build(unit,chunks,sentences,existing,model_key,model_call,progress,target=10
             if group and row['language']!=group[0]['language']:break
             group.append(row)
         offset+=len(group)
+        before=len(cards)
         try:drafts=_generate(group,unit['title'],model_key,model_call)
         except Exception as exc:raise RuntimeError('Selected model could not draft exam questions: '+str(exc))
         lookup={r['id']:r for r in group};candidates=[]
@@ -223,6 +226,7 @@ def build(unit,chunks,sentences,existing,model_key,model_call,progress,target=10
                               'generation_method':'exam-mcq-v5','question':question})
                 used_anchors.add(source['anchor']);used_stems.add(card['normalized'])
                 if len(cards)>=target:break
+        if len(cards)==before:reject_steps()
         processed+=len(group)
         progress(cards,len(evidence),processed)
     return cards

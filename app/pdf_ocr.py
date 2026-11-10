@@ -1,4 +1,5 @@
 """Bounded local OCR for scanned pages and broken PDF text layers (Python 3.6)."""
+from cpu_budget import cpu_bound
 import csv
 import hashlib
 import io
@@ -64,6 +65,7 @@ class LocalOCR:
                 'installed_languages':self.languages,'error':self.error,
                 'setup':'Install Tesseract with eng and chi_tra data; choose other installed languages using VQ_PDF_OCR_LANGS.'}
 
+    @cpu_bound
     def render(self,page):
         """The page as PNG bytes (main thread: PyMuPDF documents are not shared between threads)."""
         import fitz
@@ -77,6 +79,7 @@ class LocalOCR:
         encoder=getattr(pixmap,'tobytes',None) or getattr(pixmap,'getPNGData')
         return encoder()
 
+    @cpu_bound
     def recognize(self,png):
         """Run Tesseract on rendered PNG bytes; safe to call from several threads at once."""
         if self.error:return {'ok':False,'error':self.error}

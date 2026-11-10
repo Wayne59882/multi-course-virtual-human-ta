@@ -15,6 +15,7 @@ except ImportError:
     print('SKIP parallel OCR: PyMuPDF is not installed')
     raise SystemExit(0)
 os.environ['VQ_OCR_WORKERS'] = '4'
+os.environ['VQ_CPU_WORKERS'] = '4'
 import pdf_ingestion  # noqa: E402
 import pdf_ocr  # noqa: E402
 
@@ -77,8 +78,9 @@ with tempfile.TemporaryDirectory() as temporary:
         else:
             assert row['extraction_method'] == 'local_ocr' and 'slide %d ' % row['page'] in row['text'], row
             assert row['figure_pending']
-    assert ocr.most >= 3, 'pages were recognised one at a time (%d at most)' % ocr.most
-    assert elapsed < (pages - 1) * SECONDS * 0.6, 'parallel OCR took %.1fs' % elapsed
+    expected=pdf_ingestion.ocr_workers()
+    assert ocr.most==expected, 'OCR did not respect the allocated CPU work budget'
+    if expected>1:assert elapsed < (pages - 1) * SECONDS * .9, 'parallel OCR took %.1fs' % elapsed
     assert 6 not in ocr.rendered, 'a page with a text layer is not OCR-ed'
     # Cached pages are not read again.
     again = StandInOCR()

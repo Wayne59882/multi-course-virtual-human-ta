@@ -11,6 +11,8 @@ from pathlib import Path
 import re
 import time
 from content_integrity import extract_page, text_issues
+from work_steps import atomic_json
+from cpu_budget import cpu_workers, cpu_bound
 from pdf_ocr import LocalOCR
 from pdf_vision import LocalVision,teaching_images
 
@@ -31,12 +33,6 @@ SLIDE_TEXT=10   # a slide's own text (e.g. its title) is enough to open the cour
 def reading_mode(value=None):
     value=str(value or FIGURES_MODE).strip().lower()
     return value if value in READING_MODES else 'fast'
-
-def atomic_json(path,value):
-    path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
-    temporary=path.with_name(path.name+'.%s.tmp'%os.getpid())
-    temporary.write_text(json.dumps(value,ensure_ascii=False),encoding='utf-8')
-    os.replace(str(temporary),str(path))
 
 def digest_file(path):
     digest=hashlib.sha256()
@@ -128,8 +124,13 @@ def inspect_page(page,number,ocr=None,activity=None,vision=None,mode=None):
 
 def ocr_workers():
     """Tesseract processes run at once while reading scanned pages (one CPU thread each)."""
-    try:return max(1,int(os.environ.get('VQ_OCR_WORKERS') or 0)) if os.environ.get('VQ_OCR_WORKERS') else max(1,min(4,(os.cpu_count() or 2)//2))
+    try:return min(cpu_workers(),max(1,int(os.environ.get('VQ_OCR_WORKERS',str(cpu_workers())))))
     except ValueError:return 1
+
+
+@cpu_bound
+def _recognize(ocr,png):
+    return ocr.recognize(png)
 
 
 class PrefetchedOCR(object):
@@ -147,7 +148,7 @@ class PrefetchedOCR(object):
             if ahead in self.futures or skip(ahead):continue
             page=doc[ahead-1]
             if not _scanned_page(page):continue
-            try:self.futures[ahead]=self.pool.submit(self.ocr.recognize,self.ocr.render(page))
+            try:self.futures[ahead]=self.pool.submit(_recognize,self.ocr,self.ocr.render(page))
             except Exception:continue
         for old in [key for key in self.futures if key<number]:self.futures.pop(old).cancel()
 

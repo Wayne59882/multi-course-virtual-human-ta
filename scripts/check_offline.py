@@ -101,6 +101,10 @@ def main():
         ("Operator script routing", [sys.executable, str(TESTS / "test_operator_scripts.py")]),
     ]
     suites.extend([
+        ('Durable work steps and CPU work budget', [sys.executable,str(TESTS / 'test_work_steps.py')]),
+        ('Chapter preparation pipeline and recovery', [sys.executable,str(TESTS / 'test_chapter_pipeline.py')]),
+        ('Preparation progress without image row', [node,str(TESTS / 'test_preparation_progress.cjs')]),
+        ('Boundary scheduling and background timeout', [sys.executable,str(TESTS / 'test_step_scheduling.py')]),
         ("All-course text integrity", [sys.executable,str(TESTS / "test_content_integrity.py")]),
         ("Math integrity", [sys.executable,str(TESTS / "test_math_integrity.py")]),
         ("All-course display", [node,str(TESTS / "test_content_display.cjs")]),

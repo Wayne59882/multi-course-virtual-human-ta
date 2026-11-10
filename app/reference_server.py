@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import print_function
+from work_steps import completed_call, metric, model_signature
 from math_integrity import protect_math, restore_math, loads_model_json
 from content_integrity import clean_course_text, SOURCE_RULE
 import argparse, json, os, re, threading, time, urllib.request, uuid
@@ -89,17 +90,34 @@ def course_model_call(server,model_key,system,user,max_tokens=1200):
     if '大學課程情境題出題者' in str(system or '') or 'COURSE_GROUNDING_REVIEW' in str(system or ''):
         payload['format']='json'
         payload['options']['temperature']=0.0
-    while True:
-        try:
-            with server.model_lock:
-                ensure_single_active_model(server,key,tag,base)
-                d=url_json(base+'/api/chat',payload=payload,timeout=max(LOCAL_MAX_WAIT,360))
-                server.active_model_key=key;server.active_model_tag=tag;server.active_model_base=base
-            break
-        except BackgroundPreempted:
-            # A student question took the model; retry this course step afterwards.
-            continue
-    return str(((d.get('message') or {}).get('content') or '')).strip()
+    def compute():
+        while True:
+            try:
+                with server.model_lock:
+                    ensure_single_active_model(server,key,tag,base)
+                    started=time.monotonic()
+                    try:d=url_json(base+'/api/chat',payload=payload,timeout=max(LOCAL_MAX_WAIT,360))
+                    finally:metric('model_request_seconds',time.monotonic()-started)
+                    server.active_model_key=key;server.active_model_tag=tag;server.active_model_base=base
+                for field in ('load_duration','prompt_eval_duration','eval_duration'):
+                    metric(field+'_seconds',float(d.get(field) or 0)/1e9)
+                metric('model_calls')
+                if d.get('done_reason')=='length' or d.get('done') is False:
+                    raise RuntimeError('Model step did not finish; increase its output budget before retrying.')
+                result=str(((d.get('message') or {}).get('content') or '')).strip()
+                if not result:raise RuntimeError('Model returned an empty course step.')
+                if payload.get('format')=='json':
+                    begin,end=result.find('{'),result.rfind('}')
+                    parsed=loads_model_json(result[begin:end+1] if begin>=0 and end>begin else result)
+                    if not isinstance(parsed,dict):raise ValueError('Model returned a non-object JSON step.')
+                return result
+            except BackgroundPreempted:
+                metric('preemptions')
+                continue
+    # A scope is installed only for private background preparation. Student
+    # answers remain live and cancellation/model switching retain their semantics.
+    signature=model_signature(base,tag,lambda:url_json(base+'/api/show',payload={'model':tag},timeout=4))
+    return completed_call({'endpoint':base,'model_signature':signature,'payload':payload},compute)
 
 def course_local_answer(server,model_key,question,context,course_name,language_tag='en-US',improvement_hint='',feedback_comment=''):
     lang=normalize_language_tag(language_tag) or 'en-US'

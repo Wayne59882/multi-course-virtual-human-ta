@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'app'))
 PRIORITY = tempfile.mkdtemp(prefix='vq-priority-')
 os.environ['VQ_MODEL_PRIORITY_DIR'] = PRIORITY
+os.environ['VQ_BACKGROUND_PREEMPT'] = 'immediate'
 os.environ['VQ_PDF_OCR'] = 'off'
 os.environ['VQ_PDF_VISION'] = 'off'
 os.environ['VQ_PDF_VISION_FIGURES'] = 'background'  # exercise the optional deferred mode
