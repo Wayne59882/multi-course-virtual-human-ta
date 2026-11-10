@@ -27,7 +27,7 @@ from site_metrics import heartbeat as metrics_heartbeat, snapshot as metrics_sna
 from course_runtime import COURSES
 from model_lock import SharedModelLock
 from ollama_cancel import (CancellationScope, AnswerCancelled, BackgroundPreempted, current_scope,
-    background_active, stream_chat_json, OLLAMA_NUM_CTX)
+    background_active, stream_chat_json, retry_transient, OLLAMA_NUM_CTX)
 from course_grounding import review_text,GroundingError
 
 
@@ -91,7 +91,7 @@ def course_model_call(server,model_key,system,user,max_tokens=1200):
     if '大學課程情境題出題者' in str(system or '') or 'COURSE_GROUNDING_REVIEW' in str(system or ''):
         payload['format']='json'
         payload['options']['temperature']=0.0
-    def compute():
+    def once():
         while True:
             try:
                 with server.model_lock.using(tag):
@@ -115,6 +115,10 @@ def course_model_call(server,model_key,system,user,max_tokens=1200):
             except BackgroundPreempted:
                 metric('preemptions')
                 continue
+    def compute():
+        # A restarting model server (for example a GPU-sharing change) pauses
+        # course preparation instead of failing the step.
+        return retry_transient(once)
     # A scope is installed only for private background preparation. Student
     # answers remain live and cancellation/model switching retain their semantics.
     signature=model_signature(base,tag,lambda:url_json(base+'/api/show',payload={'model':tag},timeout=4))

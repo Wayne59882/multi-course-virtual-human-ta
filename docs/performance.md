@@ -90,6 +90,15 @@ pass and again after a restart.
 Chapters without enough readable text are read again automatically, once,
 after the course's other preparation finishes (OCR, then the vision model).
 
+A model server that restarts or is briefly unreachable (for example when the
+GPU-sharing setting changes) pauses course preparation for up to
+`VQ_TRANSIENT_RETRY_SEC` (180 s) instead of failing the step; students still
+get an answer or an error at once. Preparation steps that stopped anyway
+(status error or waiting) start again by themselves every
+`VQ_PREPARATION_RETRY_SEC` (600 s, doubling each time), at most
+`VQ_PREPARATION_RETRIES` (3) times until the step is ready again; work that is
+already done is reused, so a retry continues where it stopped.
+
 Text-rich pages with a bounded graphical region can be cropped for visual
 reading. Every embedded image and vector drawing is included, with margins for
 captions. Scans, unreadable text and unsupported APIs retain the full page.

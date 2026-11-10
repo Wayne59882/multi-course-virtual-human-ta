@@ -431,6 +431,53 @@ def stream_chat_json(url, payload, timeout):
             pass
 
 
+def transient_error(error):
+    """A failure that goes away by itself: the model server restarting or briefly unreachable."""
+    import http.client
+    import urllib.error
+    if isinstance(error, (BackgroundPreempted, AnswerCancelled, TimeoutError, socket.timeout)):
+        return False
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code >= 500
+    if isinstance(error, urllib.error.URLError):
+        reason = error.reason
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            return False
+        return isinstance(reason, (ConnectionError, OSError)) or 'refused' in str(reason).lower()
+    if isinstance(error, (ConnectionError, http.client.HTTPException)):
+        return True
+    text = str(error)
+    return isinstance(error, RuntimeError) and (text.startswith('Ollama stream ended before completion')
+                                                or text.startswith('Ollama HTTP 5') or 'model is loading' in text.lower())
+
+
+def retry_transient(call):
+    """Course preparation waits out a restarting model server instead of failing.
+
+    Only background work retries (students get an answer or an error at once).
+    Retries for up to VQ_TRANSIENT_RETRY_SEC (180 s) with growing pauses;
+    deletion and cancellation still stop it immediately.
+    """
+    window = float(os.environ.get('VQ_TRANSIENT_RETRY_SEC', '180'))
+    started = None
+    delay = float(os.environ.get('VQ_TRANSIENT_FIRST_DELAY_SEC', '5'))
+    while True:
+        try:
+            return call()
+        except Exception as error:
+            if not background_active() or not transient_error(error):
+                raise
+            now = time.monotonic()
+            started = now if started is None else started
+            if now - started >= window:
+                raise
+            end = now + delay
+            while time.monotonic() < end:
+                background_check()
+                time.sleep(min(0.5, delay))
+            delay = min(30.0, delay * 2)
+
+
 def wait_for_priority_clear(poll=0.2):
     """Background work waits here while students are waiting for the model."""
     while priority_waiting():

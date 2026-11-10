@@ -13,7 +13,7 @@ from math_integrity import math_issues, question_math_ok
 from content_integrity import text_issues, clean_course_text, question_text_ok, extract_page, ContentIntegrityError, SOURCE_RULE
 from pdf_ingestion import iter_pages, unit_quality, write_receipt, atomic_json, upload_diagnostics, reading_mode, REVISION as INGESTION_REVISION
 from course_grounding import review_text,GroundingError,REVISION as REVIEW_REVISION
-from ollama_cancel import BackgroundWork, PAUSED
+from ollama_cancel import BackgroundWork, PAUSED, retry_transient
 from pdf_vision import LocalVision
 
 
@@ -455,7 +455,9 @@ def _embed(texts,timeout=240,minimal=False):
     if not minimal:payload.update({'truncate':True,'keep_alive':'12h'})
     payload['options']={'num_thread':1}
     def compute():
-        with cpu_slot():d=_url_json(EMBED_BASE+'/api/embed',payload,timeout=timeout)
+        def request():
+            with cpu_slot():return _url_json(EMBED_BASE+'/api/embed',payload,timeout=timeout)
+        d=retry_transient(request)  # the CPU slot is not held while waiting
         emb=d.get('embeddings') or []
         if single and emb and isinstance(emb[0],(int,float)):emb=[emb]
         if len(emb)!=len(items):raise RuntimeError('Embedding backend returned %s vectors for %s inputs'%(len(emb),len(items)))
@@ -748,6 +750,8 @@ class RejectedLecture(RuntimeError):pass
 class MissingLectureSource(RejectedLecture):pass
 
 LECTURE_MAX_TOKENS=int(os.environ.get('VQ_LECTURE_MAX_TOKENS','2000'))
+PREPARATION_RETRY_SECONDS=max(30,int(os.environ.get('VQ_PREPARATION_RETRY_SEC','600')))
+PREPARATION_RETRIES=int(os.environ.get('VQ_PREPARATION_RETRIES','3'))
 # When a draft is rejected, the next attempt changes how it is asked rather
 # than repeating the same request: a shorter evenly spaced excerpt and a
 # tighter five-paragraph structure (still within the five-to-seven paragraphs).
@@ -1059,6 +1063,51 @@ class CourseManager(object):
                 continue
             if man.get('status') in ('preparing','error') or any((prep.get(k) or {}).get('status') in ('preparing','error','waiting') for k in ('questions','index','lectures','figures')):
                 self._start_preparation(man['course_id'],man.get('model_key') or 'gemma',model_call)
+        self.supervise(model_call)
+
+    def supervise(self,model_call):
+        """Preparation that stopped (a model or connection failure, a full GPU) starts
+        again by itself: every VQ_PREPARATION_RETRY_SEC (600 s), with growing
+        pauses, at most PREPARATION_RETRIES times per step until it is ready again.
+        Teachers do not need to press retry."""
+        with self.running_lock:
+            if getattr(self,'_supervising',False):return
+            self._supervising=True
+        def loop():
+            while True:
+                time.sleep(PREPARATION_RETRY_SECONDS)
+                try:self._retry_stopped(model_call)
+                except Exception as error:print('Automatic preparation retry skipped: %s'%error,flush=True)
+        threading.Thread(target=loop,daemon=True).start()
+
+    def _retry_stopped(self,model_call,now=None):
+        now=time.time() if now is None else now;started=[]
+        for man in self.list_courses():
+            cid=man.get('course_id')
+            if not cid or cid in self.deleted or man.get('ingestion_complete') is False:continue
+            with self.running_lock:
+                if any(item[0]==cid for item in self.running):continue
+            prep=man.get('preparation') or {};kinds=[];reset=[]
+            for kind in ('questions','lectures','index','figures'):
+                info=prep.get(kind) or {}
+                retries=int(info.get('auto_retries') or 0)
+                if info.get('status')=='ready':
+                    if retries:reset.append(kind)
+                    continue
+                if info.get('status') not in ('error','waiting') or retries>=PREPARATION_RETRIES:continue
+                if now-float(info.get('auto_retry_at') or 0)<PREPARATION_RETRY_SECONDS*(2**retries):continue
+                kinds.append(kind)
+            if not kinds and not reset:continue
+            def mark(current,kinds=tuple(kinds),reset=tuple(reset)):
+                for kind in kinds:
+                    row=current.setdefault('preparation',{}).setdefault(kind,{})
+                    row.update({'auto_retries':int(row.get('auto_retries') or 0)+1,'auto_retry_at':now})
+                for kind in reset:current['preparation'][kind]['auto_retries']=0
+            self._update_manifest(cid,mark)
+            if kinds:
+                started.append((cid,tuple(kinds)))
+                self._start_preparation(cid,man.get('model_key') or 'gemma',model_call,only=tuple(kinds))
+        return started
 
     def _quarantine_damaged_math(self,man):
         cid=man['course_id'];cd=self._course_dir(cid);qp=cd/'question_banks.json'

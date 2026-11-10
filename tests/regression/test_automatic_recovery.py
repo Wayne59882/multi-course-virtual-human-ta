@@ -159,6 +159,41 @@ with tempfile.TemporaryDirectory() as temporary:
         reads.clear();manager._prepare_figures('course','gemma',model_call)
         assert reads==[],'pages are not read again with the same model'
 
+    # -- stopped preparation starts again by itself -------------------------
+    restarts=[]
+    manager._start_preparation=lambda cid,key,call,force=False,only=None:restarts.append(only)
+    manager._update_manifest('course',lambda m:m['preparation'].update(
+        questions={'status':'error','error':'Selected model could not draft exam questions: connection refused'},
+        index={'status':'ready','auto_retries':2}))
+    period=cr.PREPARATION_RETRY_SECONDS
+    # (lectures is still 'error' from the chapter that failed every variant above: re-checking it costs no model call)
+    assert manager._retry_stopped(model_call,now=10000)==[('course',('questions','lectures'))]
+    assert manager._retry_stopped(model_call,now=10000+period)==[],'waits longer after each retry'
+    assert manager._retry_stopped(model_call,now=10000+2*period+1)==[('course',('questions','lectures'))]
+    assert manager._retry_stopped(model_call,now=10000+7*period)==[('course',('questions','lectures'))]
+    assert manager._retry_stopped(model_call,now=10000+100*period)==[],'at most three automatic retries'
+    prep=manager.manifest('course')['preparation']
+    assert prep['questions']['auto_retries']==cr.PREPARATION_RETRIES and prep['index']['auto_retries']==0
+    del manager._start_preparation
+
+    # -- a restarting model server pauses preparation instead of failing it --
+    import urllib.error
+    attempts=[]
+    def flaky():
+        attempts.append(1)
+        if len(attempts)<3:raise urllib.error.URLError(ConnectionRefusedError(111,'Connection refused'))
+        return 'drafted'
+    with patch.dict(os.environ,{'VQ_TRANSIENT_FIRST_DELAY_SEC':'0.05'}):
+        with oc.BackgroundWork():assert oc.retry_transient(flaky)=='drafted' and len(attempts)==3
+        attempts.clear()
+        try:oc.retry_transient(flaky);raise AssertionError('students are not kept waiting by retries')
+        except urllib.error.URLError:pass
+        with oc.BackgroundWork():
+            try:oc.retry_transient(lambda:(_ for _ in ()).throw(ValueError('rejected draft')));raise AssertionError
+            except ValueError:pass   # content failures are not retried here
+            try:oc.retry_transient(lambda:(_ for _ in ()).throw(TimeoutError('step limit')));raise AssertionError
+            except TimeoutError:pass
+
     # -- OCR: 4 at once while quiet, 2 while students ask -------------------
     with patch.object(cpu_budget,'available_cpus',lambda:8),patch.dict(os.environ,{'VQ_CPU_WORKERS':'4','VQ_CPU_WORKERS_BUSY':'2','VQ_CPU_BUSY_WINDOW_SEC':'5'}):
         quiet=Path(oc.ACTIVITY_PATH)
@@ -167,4 +202,4 @@ with tempfile.TemporaryDirectory() as temporary:
         oc.note_student_activity()
         assert cpu_budget.cpu_workers()==2
         with patch.dict(os.environ,{'VQ_CPU_BUSY_WINDOW_SEC':'0'}):assert cpu_budget.cpu_workers()==4
-print('PASS automatic recovery: rejected lectures are asked differently, chapters prepare in parallel, failed chapters wait for the final pass, figures try crop/page/halves and never block, unreadable chapters re-read once, OCR 4 quiet / 2 busy')
+print('PASS automatic recovery: rejected lectures are asked differently, chapters prepare in parallel, failed chapters wait for the final pass, figures try crop/page/halves and never block, unreadable chapters re-read once, stopped steps restart by themselves (3 times, growing pauses), a restarting model server only pauses preparation, OCR 4 quiet / 2 busy')
