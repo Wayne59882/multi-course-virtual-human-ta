@@ -749,6 +749,26 @@ def _lecture_evidence(unit,chunks,max_chars=6200):
 class RejectedLecture(RuntimeError):pass
 class MissingLectureSource(RejectedLecture):pass
 
+
+def _unread_pages(quality,retryable=False):
+    """Pages with no readable text. retryable: not yet tried with every reader
+    (a page the vision model could not verify in any way, such as a blank or a
+    purely decorative page, is not read again with the same model)."""
+    rows=[w for w in (quality or {}).get('warnings') or [] if w.get('status')=='needs_review']
+    if retryable:rows=[w for w in rows if not (w.get('vision') or {}).get('exhausted')]
+    return rows
+
+
+def _review_summary(qualities):
+    """Pages read by OCR are usable; only pages with no readable text count."""
+    unread=sum(len(_unread_pages(q)) for q in qualities.values())
+    retryable=sum(len(_unread_pages(q,True)) for q in qualities.values())
+    return {'required':bool(retryable),'units':qualities,'unread_pages':unread,'retryable_pages':retryable}
+
+
+def _needs_reread(unit,quality):
+    return bool(_unread_pages(quality,True))
+
 LECTURE_MAX_TOKENS=int(os.environ.get('VQ_LECTURE_MAX_TOKENS','2000'))
 PREPARATION_RETRY_SECONDS=max(30,int(os.environ.get('VQ_PREPARATION_RETRY_SEC','600')))
 PREPARATION_RETRIES=int(os.environ.get('VQ_PREPARATION_RETRIES','3'))
@@ -1056,6 +1076,11 @@ class CourseManager(object):
                     for u in current.get('units') or []:u['question_count']=0
                 man=self._update_manifest(man['course_id'],prepare_bank) or man
             man=self._quarantine_damaged_math(man)
+            def refresh(current):
+                # Pages read by OCR are not "unread" (older courses counted them).
+                if current.get('source_review'):
+                    current['source_review']=_review_summary((current['source_review'].get('units') or {}))
+            man=self._update_manifest(man['course_id'],refresh) or man
             prep=man.get('preparation') or {}
             if (prep.get('sources') or {}).get('status')=='preparing':
                 # A source re-read stopped by a restart would otherwise show its last page forever.
@@ -1364,7 +1389,7 @@ class CourseManager(object):
                     u.setdefault(key,value)
                 lecture_units.append(u)
             manifest.update({'stage_id':stage['stage_id'],'ingestion_revision':'R15',
-                'source_review':{'required':any(q['status']!='readable' for q in source_quality.values()),'units':source_quality},
+                'source_review':_review_summary(source_quality),
                 'course_id':cid,'course_name':title,'course_name_source':name_source,
                 'visual_model':'vq' if visual_model=='vq' else 'none',
                 'visual_model_label':'V/Q Visual Model' if visual_model=='vq' else 'No Specialized Visual Model',
@@ -1467,30 +1492,47 @@ class CourseManager(object):
         if not launched:self._auto_repair(cid,model_key,model_call)
 
     def _auto_repair(self,cid,model_key,model_call):
-        """Chapters without enough readable text are read again automatically, once,
-        after the other preparation for the course has finished (OCR, then the
-        local vision model reading the whole page, then page halves)."""
+        """Pages with no readable text are read again automatically, once, after
+        the other preparation for the course has finished (OCR, then the local
+        vision model reading the whole page, then page halves). Only the
+        chapters containing such pages are touched."""
         with self.running_lock:
             if cid in self.deleted or any(item[0]==cid for item in self.running):return
         m=self.manifest(cid) or {}
         if m.get('ingestion_complete') is False or int(m.get('auto_source_repairs') or 0)>=1:return
-        if not any(u.get('source_blocked') or u.get('script_needs_source') for u in m.get('units') or []):return
+        known=(m.get('source_review') or {}).get('units') or {}
+        if not any(_needs_reread(u,known.get(u['id']) or u.get('source_quality')) for u in m.get('units') or []):return
         self._update_manifest(cid,lambda current:current.update({'auto_source_repairs':int(current.get('auto_source_repairs') or 0)+1}))
         self._launch_repair(cid,model_key,model_call)
 
     def retry_preparation(self,cid,model_key,model_call):
+        """Restart only the steps that are not ready; never re-read the whole PDF.
+
+        Pages with no readable text are read again afterwards, by themselves
+        (_auto_repair), and chapters that failed every lecture variant get
+        another full try.
+        """
         manifest=self.manifest(cid)
         if not manifest:raise ValueError('course not found')
-        if manifest.get('ingestion_complete') is False:
-            self._start_preparation(cid,model_key,model_call,force=True,only=('lectures','questions','index'))
-            return self.manifest(cid)
-        if (manifest.get('source_review') or {}).get('required'):
-            with self.running_lock:
-                if (cid,'sources') in self.running:return manifest
-                if any(item[0]==cid for item in self.running):raise ValueError('Background preparation is still running. Retry source OCR after it finishes; ready units remain available.')
+        with self.running_lock:
+            if (cid,'sources') in self.running:return manifest   # unreadable pages are being read again
+        prep=manifest.get('preparation') or {}
+        kinds=tuple(kind for kind in ('questions','lectures','index','figures') if (prep.get(kind) or {}).get('status')!='ready')
+        def reset(current):
+            current['auto_source_repairs']=0
+            for kind in kinds:current.setdefault('preparation',{}).setdefault(kind,{})['auto_retries']=0
+            for unit in current.get('units') or []:
+                if unit.get('script_status')=='error':unit['script_attempts']=0
+        self._update_manifest(cid,reset)
+        with self.running_lock:busy=any(item[0]==cid for item in self.running)
+        known=(manifest.get('source_review') or {}).get('units') or {}
+        if not busy and any(_needs_reread(u,known.get(u['id']) or u.get('source_quality')) for u in manifest.get('units') or []):
+            # Nothing else is running: read the unread pages now (only their chapters);
+            # the stopped steps continue as soon as that finishes.
+            self._update_manifest(cid,lambda current:current.update({'auto_source_repairs':1}))
             self._launch_repair(cid,model_key,model_call)
-            return self.manifest(cid)
-        self._start_preparation(cid,model_key,model_call,force=True)
+        elif kinds:self._start_preparation(cid,model_key,model_call,only=kinds)
+        else:self._auto_repair(cid,model_key,model_call)
         return self.manifest(cid)
 
     def _launch_repair(self,cid,model_key,model_call):
@@ -1499,7 +1541,7 @@ class CourseManager(object):
         with self.running_lock:
             if key in self.running:return
             self.running.add(key)
-        self._update_manifest(cid,lambda m:m.setdefault('preparation',{}).update({'sources':{'status':'preparing','message':'Retrying source OCR from the saved original PDF','started_at':time.time()}}))
+        self._update_manifest(cid,lambda m:m.setdefault('preparation',{}).update({'sources':{'status':'preparing','message':'Reading pages with no readable text again','started_at':time.time()}}))
         def repair():
             try:
                 # Not a build slot: a long re-read must not hold up other teachers' new courses.
@@ -1513,17 +1555,32 @@ class CourseManager(object):
         threading.Thread(target=repair,daemon=True).start()
 
     def _repair_sources(self,cid):
-        """Retry problem pages from retained originals; preserve unchanged banks."""
+        """Read again only the chapters with pages that have no readable text.
+
+        Other chapters keep their text, chunks and question banks; pages read
+        before are taken from the page cache, so only unread pages are re-read.
+        """
         m=self.manifest(cid);cd=self._course_dir(cid);sd=self._stage_dir(m['stage_id'])
         stage=json.loads((sd/'stage.json').read_text(encoding='utf-8'))
         selected={unit['id']:unit for unit in stage['units']}
+        known=(m.get('source_review') or {}).get('units') or {}
+        targets={u['id'] for u in m['units'] if _needs_reread(u,known.get(u['id']) or u.get('source_quality'))}
+        try:old_chunks=[json.loads(x) for x in (cd/'chunks.jsonl').read_text(encoding='utf-8').splitlines() if x]
+        except OSError:old_chunks=[]
         chunks=[];texts={};qualities={};changed=set()
-        total=sum(int(selected[u['id']]['end_page'])-int(selected[u['id']]['start_page'])+1 for u in m['units']);seen=set();pending=[]
+        total=sum(int(selected[u['id']]['end_page'])-int(selected[u['id']]['start_page'])+1 for u in m['units'] if u['id'] in targets)
+        seen=set();pending=[];shown=[0.0]
         for unit in m['units']:
             spec=selected[unit['id']];uid=unit['id']
+            if uid not in targets:
+                chunks.extend(row for row in old_chunks if row.get('unit_id')==uid)
+                qualities[uid]=known.get(uid) or unit.get('source_quality') or {}
+                continue
             source=next(row for row in stage['sources'] if row['file_name']==spec['source_file'])
             def progress(row,cached,uid=uid):
                 if row['status'] not in ('ocr_running','vision_running'):seen.add((uid,row['page']))
+                if time.time()-shown[0]<1 and len(seen)<total:return   # at most one progress write a second
+                shown[0]=time.time()
                 label='Local OCR' if row['status']=='ocr_running' else 'Local visual reading' if row['status']=='vision_running' else 'Reading saved PDF'
                 self._update_manifest(cid,lambda current:current['preparation']['sources'].update({'current_page':row['page'],'completed':len(seen),'total':total,'updated_at':time.time(),
                     'message':'%s: page %s (%s / %s pages)'%(label,row['page'],len(seen),total)}))
@@ -1546,7 +1603,7 @@ class CourseManager(object):
             backup=cd/'backups'/('source_ocr_'+uuid.uuid4().hex);backup.mkdir(parents=True)
             for name in ('course_manifest.json','chunks.jsonl','question_banks.json','scenario_cache.json'):
                 if (cd/name).exists():shutil.copy2(str(cd/name),str(backup/name))
-            for uid,text in texts.items():(cd/'units'/(uid+'.txt')).write_text(text,encoding='utf-8')
+            for uid,text in texts.items():(cd/'units'/(uid+'.txt')).write_text(text,encoding='utf-8')  # re-read chapters only
             banks=json.loads((cd/'question_banks.json').read_text(encoding='utf-8'))
             _json_dump(cd/'question_banks.json',{uid:cards for uid,cards in banks.items() if uid not in changed})
             _json_dump(cd/'scenario_cache.json',{})
@@ -1563,9 +1620,11 @@ class CourseManager(object):
         if added:
             m['figure_pages']=list(m.get('figure_pages') or [])+added
             m['preparation']['figures']={'status':'waiting','completed':0,'total':len(m['figure_pages']),'message':'Figures are read after lectures are ready'}
-        m['source_review']={'required':any(q['status']!='readable' for q in qualities.values()),'units':qualities}
+        m['source_review']=_review_summary(qualities)
         if changed:m['status']='preparing' if chunks else 'source_review'
-        m['preparation']['sources']={'status':'ready','message':'Source OCR retry finished; remaining gaps are listed in upload diagnostics'}
+        m['preparation']['sources']={'status':'ready','message':'Pages with no readable text were read again (%s pages in %s chapters)'%(total,len(targets))}
+        for unit in m['units']:
+            if unit['id'] in targets:unit['script_needs_source']=False
         # Retain concurrently updated source-progress metadata only until this
         # completed snapshot is installed; other preparation is locked out.
         _json_dump(cd/'course_manifest.json',m)

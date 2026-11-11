@@ -101,12 +101,62 @@ with tempfile.TemporaryDirectory() as temporary:
     assert manager.manifest('course')['units'][2]['script_attempts']==2
     assert lecture_calls()==0
 
-    # -- automatic re-reading of chapters without readable text -------------
+    # -- what needs reading again: only pages with no text, not OCR pages ---
+    ocr_page={'page':4,'status':'partial','ocr':{'ok':True}}
+    blank={'page':5,'status':'needs_review','vision':{'ok':False,'exhausted':True}}
+    unread={'page':6,'status':'needs_review','vision':{'ok':False,'error':'vision model unavailable'}}
+    summary=cr._review_summary({'unit1':{'warnings':[ocr_page]*900,'status':'partial'}})
+    assert not summary['required'] and summary['unread_pages']==0,'pages read by OCR are usable'
+    summary=cr._review_summary({'unit1':{'warnings':[ocr_page,blank],'status':'partial'}})
+    assert not summary['required'] and summary['unread_pages']==1 and summary['retryable_pages']==0,'a blank page is not read again'
+    summary=cr._review_summary({'unit1':{'warnings':[ocr_page,blank,unread],'status':'partial'}})
+    assert summary['required'] and summary['retryable_pages']==1
+
+    # A page every reader already failed on is not read again with the same readers.
+    import pdf_ingestion
+    calls={'ocr':0,'vision':0}
+    class NoOCR(object):
+        fingerprint='ocr-1';requested='eng';error='unavailable'
+        def read(self,page):calls['ocr']+=1;return {'ok':False,'error':'no text'}
+    class NoVision(object):
+        fingerprint='vision-1'
+        def __init__(self,exhausted):self.exhausted=exhausted
+        def read(self,page):calls['vision']+=1;return {'ok':False,'error':'nothing verifiable','exhausted':self.exhausted}
+    blank_doc=fitz.open();picture=blank_doc.new_page()
+    pixels=fitz.Pixmap(fitz.csRGB,fitz.IRect(0,0,40,40),False);pixels.clear_with(180)
+    picture.insert_image(fitz.Rect(100,100,400,400),pixmap=pixels)   # an image-only page
+    cache=folder/'page-cache'
+    for exhausted,expected in ((False,1),(False,2),(True,3),(True,3)):
+        list(pdf_ingestion.iter_pages(blank_doc,1,1,cache,'blank',ocr=NoOCR(),vision=NoVision(exhausted)))
+        assert calls['vision']==expected,(exhausted,calls)
+    blank_doc.close()
+
+    # -- automatic re-reading of pages without readable text ----------------
     launched=[]
     manager._launch_repair=lambda cid,key,call:launched.append(cid)
-    manager._update_manifest('course',lambda m:m['units'][2].update(script_needs_source=True))
+    manager._update_manifest('course',lambda m:m.update(source_review=cr._review_summary({'unit3':{'warnings':[ocr_page]*50,'status':'partial'}})))
+    manager._auto_repair('course','gemma',model_call)
+    assert launched==[],'OCR pages alone never trigger a re-read'
+    manager._update_manifest('course',lambda m:m.update(source_review=cr._review_summary({'unit3':{'warnings':[ocr_page,unread],'status':'partial'}})))
     manager._auto_repair('course','gemma',model_call);manager._auto_repair('course','gemma',model_call)
-    assert launched==['course'],'the source pages are read again once, automatically'
+    assert launched==['course'],'the unread pages are read again once, automatically'
+
+    # -- Retry restarts only the stopped steps -------------------------------
+    restarted=[]
+    manager._start_preparation=lambda cid,key,call,force=False,only=None:restarted.append(only)
+    manager._update_manifest('course',lambda m:(m.update(source_review=cr._review_summary({'unit3':{'warnings':[ocr_page]*900,'status':'partial'}})),
+        m['preparation'].update(lectures={'status':'error','error':'x','auto_retries':3},questions={'status':'ready'},index={'status':'ready'},figures={'status':'ready'}),
+        m['units'][2].update(script_status='error',script_attempts=2)))
+    launched.clear();manager.retry_preparation('course','gemma',model_call)
+    assert restarted==[('lectures',)] and launched==[],'Retry neither re-reads the PDF nor redoes finished steps'
+    current=manager.manifest('course')
+    assert current['preparation']['lectures']['auto_retries']==0 and current['units'][2]['script_attempts']==0
+    # With pages that really have no text, those pages are read first (nothing else running).
+    restarted.clear()
+    manager._update_manifest('course',lambda m:m.update(source_review=cr._review_summary({'unit3':{'warnings':[ocr_page,unread],'status':'partial'}})))
+    manager.retry_preparation('course','gemma',model_call)
+    assert launched==['course'] and restarted==[]
+    del manager._start_preparation
 
     # -- figure pages: reading variants -------------------------------------
     document=fitz.open();page=document.new_page()
@@ -202,4 +252,4 @@ with tempfile.TemporaryDirectory() as temporary:
         oc.note_student_activity()
         assert cpu_budget.cpu_workers()==2
         with patch.dict(os.environ,{'VQ_CPU_BUSY_WINDOW_SEC':'0'}):assert cpu_budget.cpu_workers()==4
-print('PASS automatic recovery: rejected lectures are asked differently, chapters prepare in parallel, failed chapters wait for the final pass, figures try crop/page/halves and never block, unreadable chapters re-read once, stopped steps restart by themselves (3 times, growing pauses), a restarting model server only pauses preparation, OCR 4 quiet / 2 busy')
+print('PASS automatic recovery: rejected lectures are asked differently, chapters prepare in parallel, failed chapters wait for the final pass, figures try crop/page/halves and never block, only pages with no text are re-read (once, not blank pages), Retry restarts only stopped steps, stopped steps restart by themselves (3 times, growing pauses), a restarting model server only pauses preparation, OCR 4 quiet / 2 busy')

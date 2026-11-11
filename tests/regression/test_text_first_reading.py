@@ -179,6 +179,10 @@ with tempfile.TemporaryDirectory() as temporary:
     # 8. A source re-read stopped by a server restart is resumed (it used to show its last page forever).
     def interrupted(m):
         m['preparation'].update({'sources': {'status': 'preparing', 'message': 'Reading saved PDF: page 2'}}); m['figure_pages'] = []
+        # The re-read was for pages that had no readable text (only such chapters are re-read).
+        for unit in m['units']:
+            quality = m['source_review']['units'].setdefault(unit['id'], {'warnings': []})
+            quality.setdefault('warnings', []).append({'page': unit['start_page'], 'status': 'needs_review', 'vision': {'ok': False, 'error': 'vision model unavailable'}})
     manager._update_manifest(cid, interrupted)
     messages = []
     real_update = manager._update_manifest

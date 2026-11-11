@@ -198,6 +198,10 @@ def _pages(doc,first,last,directory,progress,ocr,vision,mode,prefetch):
             try:
                 row=json.loads(path.read_text(encoding='utf-8'))
                 cached=row.get('page')==number and row.get('status') in ('readable','blank','partial')
+                # Every reader already tried this page and none could verify any text
+                # (a blank or decorative page): do not read it again with the same readers.
+                if row.get('page')==number and row.get('status')=='needs_review' and (row.get('vision') or {}).get('exhausted'):
+                    cached=row.get('vision_config')==vision.fingerprint and row.get('ocr_config')==ocr.fingerprint
                 if row.get('status')=='partial':
                     # A reviewed vision reading stays valid whatever OCR is installed now.
                     seen=row.get('extraction_method')=='local_vision' and row.get('image_content_read')
