@@ -268,18 +268,20 @@ function renderPrep(note){
   const box=$('v241Prep');if(!box)return;if(!manifest){box.hidden=true;return;}
   const prep=manifest.preparation||{},units=manifest.units||[],q=prep.questions||{},lec=prep.lectures||{},idx=prep.index||{},src=prep.sources||{};
   const pct=(a,b)=>100*Number(a||0)/Math.max(1,Number(b||0));
-  const state=st=>st==='ready'?'done':st==='error'?'error':(!st||st==='waiting'||st==='queued'||st==='source_review')?'waiting':'working';
+  // 'partial': most chapters are ready and the rest are tried again automatically.
+  const settled=x=>x.status==='ready'||(x.status==='partial'&&Number(x.auto_retries||0)>=3);
+  const state=(st,x)=>st==='ready'?'done':st==='error'||(st==='partial'&&x&&settled(x))?'error':(!st||st==='waiting'||st==='queued'||st==='source_review')?'waiting':'working';
   // A stopped step is retried automatically a few times before it waits for Retry.
   const stoppedLabel=x=>Number(x.auto_retries||0)<3?'Stopped · retrying automatically':'Stopped · use Retry',rows=[],reasons=[];
-  const reason=(label,x)=>{if(x.status==='error'&&x.error)reasons.push(label+' stopped: '+String(x.error).slice(0,180));};
+  const reason=(label,x)=>{if(x.error&&(x.status==='error'||x.status==='partial'))reasons.push(label+(x.status==='error'?' stopped: ':' — not ready yet: ')+String(x.error).slice(0,180));};
   if(src.status==='preparing')rows.push(prepRow('Re-reading unreadable pages','working',src.total?`${Number(src.completed||0)} / ${src.total} pages`:'Working',pct(src.completed,src.total),src.message));
   rows.push(prepRow('Course Q&A','done','Ready',100));
   const ready=q.ready_units!=null?Number(q.ready_units):units.filter(u=>Number(u.question_count||0)>=2).length;
-  rows.push(prepRow('Practice questions',state(q.status),q.status==='error'?stoppedLabel(q):`${ready} / ${units.length} units`,q.status==='ready'?100:pct(ready,units.length),q.status==='error'?q.error:q.message));reason('Practice questions',q);
+  rows.push(prepRow('Practice questions',state(q.status,q),q.status==='error'?stoppedLabel(q):`${ready} / ${units.length} units`,q.status==='ready'?100:pct(ready,units.length),q.status==='error'?q.error:q.message));reason('Practice questions',q);
   const total=Number(lec.total_units||units.length),scripts=lec.completed_units!=null?Number(lec.completed_units):units.filter(u=>u.script_status==='ready').length;
-  rows.push(prepRow('Chinese lecture scripts',state(lec.status),lec.status==='error'?stoppedLabel(lec):`${scripts} / ${total} units`,lec.status==='ready'?100:pct(scripts,total),lec.status==='error'?lec.error:lec.message));reason('Chinese lecture scripts',lec);
-  rows.push(prepRow('Semantic search',state(idx.status),idx.status==='ready'?'Ready':idx.status==='error'?stoppedLabel(idx):idx.total?Math.round(pct(idx.completed,idx.total))+'%':'Waiting',idx.status==='ready'?100:pct(idx.completed,idx.total),idx.message));reason('Semantic search',idx);
-  const finished=[q,lec,idx].every(x=>x.status==='ready')&&manifest.ingestion_complete!==false&&src.status!=='preparing';
+  rows.push(prepRow('Chinese lecture scripts',state(lec.status,lec),lec.status==='error'?stoppedLabel(lec):`${scripts} / ${total} units`,lec.status==='ready'?100:pct(scripts,total),lec.status==='error'?lec.error:lec.message));reason('Chinese lecture scripts',lec);
+  rows.push(prepRow('Semantic search',state(idx.status,idx),idx.status==='ready'?'Ready':idx.status==='error'?stoppedLabel(idx):idx.total?Math.round(pct(idx.completed,idx.total))+'%':'Waiting',idx.status==='ready'?100:pct(idx.completed,idx.total),idx.message));reason('Semantic search',idx);
+  const finished=[q,lec,idx].every(settled)&&manifest.ingestion_complete!==false&&src.status!=='preparing';
   const others=activity&&Number(activity.other_courses||0)+Number(activity.other_builds||0);
   const line=[note,!finished&&others?'Other courses are also preparing; the model takes turns, and the course open here goes first.':''].filter(Boolean).join(' ');
   // Why a step stopped is shown, not hidden in a tooltip.

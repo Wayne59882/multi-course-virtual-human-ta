@@ -71,9 +71,19 @@ period instead of making the GPU swap models back and forth.
 
 ## Automatic recovery
 
+Reading a PDF rarely fails; what can stop is writing: lecture scripts and
+practice questions are written by the model and then checked against the
+material. One chapter that does not pass never stops the others: the step is
+shown as partial (for example 13 / 15 chapters) with the reason, and the
+remaining chapters are tried again automatically.
+
 A rejected lecture draft (not mainly Traditional Chinese, unreadable symbols,
 unsupported claims) is followed by a differently asked draft: a shorter evenly
-spaced excerpt and a tighter five-paragraph structure. While later chapters are
+spaced excerpt made of complete sentences (slide keywords read by OCR are left
+out) and a tighter five-paragraph structure. A chapter whose lecture is
+rejected on two passes gets the chapter's own key sentences, evenly spaced and
+unchanged, as its lecture text; a written lecture is tried again when new
+material for the chapter arrives (for example figure readings). While later chapters are
 still being extracted, a chapter that failed every variant waits for the final
 pass instead of being retried after each new chapter; it gets one more full set
 of variants on the final pass. The lecture output limit is

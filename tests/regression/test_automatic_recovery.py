@@ -43,7 +43,8 @@ def build_course(folder,manager,units_count=3):
     for i in range(units_count):
         page=document.new_page()
         page.insert_textbox(fitz.Rect(40,40,550,700),
-                            ('Ventilation and perfusion are matched in healthy lungs. Chapter %d explains the oxygen gradient. '%i)*8)
+                            ('Ventilation and perfusion are matched in healthy lungs in chapter %d. Oxygen diffuses from alveolar gas into pulmonary capillary blood. '
+                             'Carbon dioxide leaves the blood and is exhaled with each breath. Regional differences in blood flow change the local gas exchange ratio. '%i)*3)
     source=folder/'source.pdf';document.save(source);document.close()
     stage=manager.inspect([('source.pdf',source)],course_name='Respiration')
     name=stage['sources'][0]['file_name']
@@ -83,6 +84,8 @@ with tempfile.TemporaryDirectory() as temporary:
     assert units['unit1']['script_status']=='ready' and units['unit1']['script_variant']==1
     assert units['unit2']['script_status']=='ready' and CHINESE in units['unit2']['script']
     assert units['unit3']['script_status']=='error' and units['unit3']['script_attempts']==1
+    lectures=manager.manifest('course')['preparation']['lectures']
+    assert lectures['status']=='partial' and 'Respiration 3' in lectures['error'],'one chapter does not stop the step'
     assert seen['budgets']=={cr.LECTURE_MAX_TOKENS} and cr.LECTURE_MAX_TOKENS==2000
     assert sum(1 for unit,_ in seen['calls'] if unit=='Respiration 3')==len(cr.LECTURE_VARIANTS)
     assert seen['peak']==2,'two chapters should be written at once (peak %s)'%seen['peak']
@@ -98,8 +101,34 @@ with tempfile.TemporaryDirectory() as temporary:
     # Final pass: one more full set of variants, then it stops.
     manager._update_manifest('course',lambda m:m.update(ingestion_complete=True))
     assert lecture_calls()==len(cr.LECTURE_VARIANTS)
-    assert manager.manifest('course')['units'][2]['script_attempts']==2
+    third=manager.manifest('course')['units'][2]
+    assert third['script_attempts']==2
+    # Written twice, rejected twice: the chapter's own key sentences (no page numbers, nothing invented).
+    assert third['script_status']=='ready' and third['script_kind']=='source_excerpts',third
+    assert third['script'].startswith('Key points from the course material') and 'Oxygen diffuses from alveolar gas' in third['script']
+    assert 'page' not in third['script'].lower()
+    assert manager.manifest('course')['preparation']['lectures']['status']=='ready'
     assert lecture_calls()==0
+
+    # -- cleaner lecture material ---------------------------------------------
+    fragments='Gene\nexpression\nRNA-seq\nreads\nalignment\nFold change\np < 0.05\nHeatmap'
+    sentences='RNA sequencing measures how strongly each gene is expressed in a sample. Reads are aligned to the genome before they are counted for every gene.'
+    assert cr._passage_quality(fragments)<0.25<=cr._passage_quality(sentences)
+    rows=[{'text':fragments}]*6+[{'text':sentences+' '+sentences}]*3
+    assert 'Heatmap' not in cr._lecture_evidence({},rows,6200,0.45) and 'Heatmap' in cr._lecture_evidence({},rows,6200,0.0)
+    assert cr._source_excerpt_lecture({},[{'text':fragments}])=='','fragments alone never become a lecture'
+
+    # -- one chapter's questions do not stop the others ----------------------
+    def build(unit,chunks,sentences,existing,key,call,save,target,max_new_facts=None):
+        if unit['title']=='Respiration 3':raise RuntimeError('model output was not valid JSON')
+        cards=[{'question':{'generation_method':cr.QUESTION_GENERATION,'stem':'q%d'%n}} for n in range(target)]
+        save(cards,target,target);return cards
+    with patch.object(cr,'build_exam_questions',build):
+        manager._prepare_questions('course','gemma',model_call)
+    current=manager.manifest('course')
+    questions=current['preparation']['questions']
+    assert questions['status']=='partial' and questions['ready_units']==2 and 'Respiration 3' in questions['error'],questions
+    assert current['status']!='error','the course stays usable'
 
     # -- what needs reading again: only pages with no text, not OCR pages ---
     ocr_page={'page':4,'status':'partial','ocr':{'ok':True}}
@@ -252,4 +281,4 @@ with tempfile.TemporaryDirectory() as temporary:
         oc.note_student_activity()
         assert cpu_budget.cpu_workers()==2
         with patch.dict(os.environ,{'VQ_CPU_BUSY_WINDOW_SEC':'0'}):assert cpu_budget.cpu_workers()==4
-print('PASS automatic recovery: rejected lectures are asked differently, chapters prepare in parallel, failed chapters wait for the final pass, figures try crop/page/halves and never block, only pages with no text are re-read (once, not blank pages), Retry restarts only stopped steps, stopped steps restart by themselves (3 times, growing pauses), a restarting model server only pauses preparation, OCR 4 quiet / 2 busy')
+print('PASS automatic recovery: one chapter never stops the others (partial), rejected lectures are asked differently with cleaner material and finally become the chapter key sentences, chapters prepare in parallel, failed chapters wait for the final pass, figures try crop/page/halves and never block, only pages with no text are re-read (once, not blank pages), Retry restarts only stopped steps, stopped steps restart by themselves (3 times, growing pauses), a restarting model server only pauses preparation, OCR 4 quiet / 2 busy')

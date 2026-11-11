@@ -733,8 +733,35 @@ def _relationship_cards(statement,unit_title):
             cards.append(('outcome','%s研究 %s 透過 %s 發揮作用。預期哪一項會%s？'%(setting,subject,cause,direction),outcome))
     return [(kind,stem,answer) for kind,stem,answer in cards if len(stem)<=210 and answer.casefold() not in stem.casefold() and not _PDF_PRIVATE.search(stem)]
 
-def _lecture_evidence(unit,chunks,max_chars=6200):
+_SENTENCE_END=re.compile(r'(?<=[.!?\u3002\uff01\uff1f;\uff1b])\s+')
+
+
+def _sentence_like(text):
+    """A complete sentence, not a list of slide keywords one per line."""
+    t=str(text or '').strip()
+    lines=[line for line in t.splitlines() if line.strip()] or ['']
+    if len(re.findall(r'[\u3400-\u9fff]',t))>=12:
+        return len(re.findall(r'[\u3400-\u9fff]',t))/float(len(lines))>=8
+    return len(t.split())>=6 and len(t.split())/float(len(lines))>=4
+
+
+def _passage_quality(text):
+    """Share of a passage made of complete sentences (0 to 1). Slide OCR often
+    yields keyword fragments; those make poor lecture material."""
+    t=str(text or '').strip()
+    if not t or text_issues(t):return 0.0
+    visible=sum(not c.isspace() for c in t) or 1
+    if sum(c.isalpha() for c in t)/float(visible)<0.55:return 0.1
+    good=sum(len(part) for part in _SENTENCE_END.split(t) if _sentence_like(part))
+    return min(1.0,good/float(max(1,len(t))))
+
+
+def _lecture_evidence(unit,chunks,max_chars=6200,min_quality=0.0):
     rows=[str(c.get('text') or '').strip() for c in chunks if str(c.get('text') or '').strip() and not text_issues(c.get('text'))]
+    if min_quality>0:
+        # Prefer complete sentences; fall back to everything readable if that leaves too little.
+        clean=[row for row in rows if _passage_quality(row)>=min_quality]
+        if sum(len(x) for x in clean)>=400:rows=clean
     if sum(len(x)+2 for x in rows)<=max_chars:return '\n\n'.join(rows)
     # Balanced chapter coverage using complete bounded passages.
     picked=[];used=0
@@ -775,18 +802,44 @@ PREPARATION_RETRIES=int(os.environ.get('VQ_PREPARATION_RETRIES','3'))
 # When a draft is rejected, the next attempt changes how it is asked rather
 # than repeating the same request: a shorter evenly spaced excerpt and a
 # tighter five-paragraph structure (still within the five-to-seven paragraphs).
+# Each later variant also uses cleaner material: passages made of complete
+# sentences instead of slide fragments read by OCR.
 LECTURE_VARIANTS=(
-    (6200,'請寫 5 至 7 段繁體中文講稿，先定義核心概念，再用教材中的例子解釋機轉，最後歸納。'),
-    (4600,'請寫 5 段繁體中文講稿，每段 3 至 5 句：先定義核心概念，再用教材中的例子解釋機轉，最後歸納。只寫教材明確支持的內容，全部使用繁體中文。'),
-    (3400,'請寫 5 段精簡的繁體中文講稿，每段 2 至 4 句，只解釋下面摘錄中明確寫出的概念與機轉，最後一段歸納。不確定的內容一律省略。'),
+    (6200,'請寫 5 至 7 段繁體中文講稿，先定義核心概念，再用教材中的例子解釋機轉，最後歸納。',0.25),
+    (4600,'請寫 5 段繁體中文講稿，每段 3 至 5 句：先定義核心概念，再用教材中的例子解釋機轉，最後歸納。只寫教材明確支持的內容，全部使用繁體中文。',0.45),
+    (3400,'請寫 5 段精簡的繁體中文講稿，每段 2 至 4 句，只解釋下面摘錄中明確寫出的概念與機轉，最後一段歸納。不確定的內容一律省略。',0.6),
 )
+
+
+def _source_excerpt_lecture(unit,chunks,limit=12):
+    """Last resort for a chapter no written lecture passed review for: the
+    chapter's own key sentences, evenly spaced, unchanged (nothing invented)."""
+    picked=[];seen=set()
+    for threshold in (0.45,0.25):
+        candidates=[]
+        for chunk in chunks:
+            text=str(chunk.get('text') or '').strip()
+            if _passage_quality(text)<threshold:continue
+            for sentence in _SENTENCE_END.split(text):
+                sentence=re.sub(r'\s+',' ',sentence).strip()
+                key=sentence.lower()
+                if 40<=len(sentence)<=320 and _sentence_like(sentence) and not text_issues(sentence) and key not in seen:
+                    seen.add(key);candidates.append(sentence)
+        if len(candidates)>=3:
+            step=max(1.0,len(candidates)/float(limit))
+            picked=[candidates[int(i*step)] for i in range(min(limit,len(candidates)))]
+            break
+    if len(picked)<3:return ''
+    chinese=sum(bool(re.search(r'[\u3400-\u9fff]',x)) for x in picked)*2>=len(picked)
+    heading='本章重點（摘自教材原文）' if chinese else 'Key points from the course material'
+    return heading+'\n\n'+'\n\n'.join(picked)
 
 def _lecture_retryable(error):
     return isinstance(error,(RejectedLecture,GroundingError)) or 'did not finish' in str(error)
 
 def _chinese_lecture(unit,chunks,model_key,model_call,course_name='',variant=0):
-    max_chars,instruction=LECTURE_VARIANTS[max(0,min(int(variant),len(LECTURE_VARIANTS)-1))]
-    evidence=_lecture_evidence(unit,chunks,max_chars)
+    max_chars,instruction,quality=LECTURE_VARIANTS[max(0,min(int(variant),len(LECTURE_VARIANTS)-1))]
+    evidence=_lecture_evidence(unit,chunks,max_chars,quality)
     if len(evidence)<180:raise MissingLectureSource('This chapter has too little readable text to make a Chinese lecture yet; its pages are read again automatically.')
     system=('你是'+(_clean_text(course_name) or '目前上傳課程')+'課程的教學助理。以繁體中文撰寫可直接朗讀的課堂講稿。'
             '所有事實只能來自提供的教材，保留藥名、數值、公式與重要英文專有名詞。'
@@ -1086,7 +1139,7 @@ class CourseManager(object):
                 # A source re-read stopped by a restart would otherwise show its last page forever.
                 self._launch_repair(man['course_id'],man.get('model_key') or 'gemma',model_call)
                 continue
-            if man.get('status') in ('preparing','error') or any((prep.get(k) or {}).get('status') in ('preparing','error','waiting') for k in ('questions','index','lectures','figures')):
+            if man.get('status') in ('preparing','error') or any((prep.get(k) or {}).get('status') in ('preparing','error','waiting','partial') for k in ('questions','index','lectures','figures')):
                 self._start_preparation(man['course_id'],man.get('model_key') or 'gemma',model_call)
         self.supervise(model_call)
 
@@ -1119,7 +1172,7 @@ class CourseManager(object):
                 if info.get('status')=='ready':
                     if retries:reset.append(kind)
                     continue
-                if info.get('status') not in ('error','waiting') or retries>=PREPARATION_RETRIES:continue
+                if info.get('status') not in ('error','waiting','partial') or retries>=PREPARATION_RETRIES:continue
                 if now-float(info.get('auto_retry_at') or 0)<PREPARATION_RETRY_SECONDS*(2**retries):continue
                 kinds.append(kind)
             if not kinds and not reset:continue
@@ -1692,6 +1745,9 @@ class CourseManager(object):
             def wanted(unit):
                 if unit.get('source_blocked'):return False
                 if unit.get('script_status')=='ready' and unit.get('script') and unit.get('script_review_revision')==REVIEW_REVISION:
+                    # Key sentences stand in for a lecture until new material (for example
+                    # figure readings) arrives; then a written lecture is tried again.
+                    if unit.get('script_kind')=='source_excerpts' and unit.get('script_evidence')!=fingerprint(unit):return True
                     with guard:state['completed']+=1
                     return False
                 if unit.get('script_status')=='error' and unit.get('script_evidence')==fingerprint(unit):
@@ -1727,12 +1783,26 @@ class CourseManager(object):
                         with guard:state['completed']+=1
                         self._update_manifest(cid,lambda m,n=i,value=script,v=variant:m['units'][n].update({
                             'script':value,'script_status':'ready','script_error':'','script_review_revision':REVIEW_REVISION,
-                            'script_variant':v,'script_evidence':evidence}))
+                            'script_variant':v,'script_evidence':evidence,'script_kind':'written'}))
+                        return
+                attempts=int(unit.get('script_attempts') or 0)+1
+                content_failure=isinstance(last,MissingLectureSource) or _lecture_retryable(last)
+                if unit.get('script_kind')=='source_excerpts' and not content_failure:
+                    with guard:state['completed']+=1
+                    return   # model unavailable: the key sentences stay until the next try
+                if content_failure and (unit.get('script_kind')=='source_excerpts' or (final and attempts>=2)):
+                    # Written twice and rejected twice: the chapter's own key sentences instead.
+                    excerpts=_source_excerpt_lecture(unit,grouped.get(unit['id'],[]))
+                    if excerpts:
+                        with guard:state['completed']+=1
+                        self._update_manifest(cid,lambda m,n=i,value=excerpts,a=attempts:m['units'][n].update({
+                            'script':value,'script_status':'ready','script_error':'','script_review_revision':REVIEW_REVISION,
+                            'script_kind':'source_excerpts','script_evidence':evidence,'script_attempts':a}))
                         return
                 with guard:state['errors'].append('%s: %s'%(unit['title'],last))
-                self._update_manifest(cid,lambda m,n=i,err=str(last),missing=isinstance(last,MissingLectureSource):m['units'][n].update({
+                self._update_manifest(cid,lambda m,n=i,err=str(last),missing=isinstance(last,MissingLectureSource),a=attempts:m['units'][n].update({
                     'script':'','script_status':'error','script_error':err,'script_needs_source':missing,'script_evidence':evidence,
-                    'script_attempts':int(m['units'][n].get('script_attempts') or 0)+1}))
+                    'script_attempts':a}))
 
             def worker():
                 while True:
@@ -1743,8 +1813,12 @@ class CourseManager(object):
                     self._update_manifest(cid,lambda m,done=done:m['preparation']['lectures'].update({'completed_units':done,'total_units':len(units),'message':'Chinese lectures ready: %s / %s'%(done,len(units))}))
 
             self._parallel(cid,'text','lectures',worker,gpu_policy.background_slots())
-            state_name='error' if state['errors'] else 'ready'
-            self._update_manifest(cid,lambda m:m['preparation']['lectures'].update({'status':state_name,'error':'; '.join(state['errors'])[:1000]}))
+            # One chapter that is not ready does not stop the others: 'partial'
+            # lists it and it is tried again automatically.
+            with guard:done=state['completed'];left=len(state['errors'])
+            self._update_manifest(cid,lambda m:m['preparation']['lectures'].update({'status':'partial' if left else 'ready',
+                'error':'; '.join(state['errors'])[:1000],'completed_units':done,'total_units':len(units),
+                'message':'Chinese lectures ready: %s / %s'%(done,len(units))+('; %s chapters are tried again automatically'%left if left else '')}))
         except CourseDeleted:raise
         except Exception as e:
             self._update_manifest(cid,lambda m:m['preparation']['lectures'].update({'status':'error','error':str(e),'message':'Chinese lecture preparation stopped'}))
@@ -1935,7 +2009,7 @@ class CourseManager(object):
             banks={uid:[row for row in banks.get(uid,[]) if isinstance(row,dict) and
                 (row.get('question') or {}).get('generation_method')==QUESTION_GENERATION]
                 for uid in by_unit}
-            timing={'calls':0,'seconds':0.0}
+            timing={'calls':0,'seconds':0.0};failures={}
             def timed_model_call(*args):
                 start=time.monotonic()
                 try:return model_call(*args)
@@ -1971,8 +2045,13 @@ class CourseManager(object):
                                 'message':'%s / %s units playable; %s: %s reviewed questions, %s / %s source facts evaluated (%s)'%(
                                     ready,len(current['units']),unit_title,len(cards),processed,available,phase)})
                         self._update_manifest(cid,update)
-                    questions=build_exam_questions(u,by_unit[unit_id],_question_sentences,banks.get(unit_id) or [],
-                        model_key,timed_model_call,save_progress,target,max_new_facts=12 if target==2 else None)
+                    try:
+                        questions=build_exam_questions(u,by_unit[unit_id],_question_sentences,banks.get(unit_id) or [],
+                            model_key,timed_model_call,save_progress,target,max_new_facts=12 if target==2 else None)
+                    except CourseDeleted:raise
+                    except Exception as error:
+                        # One chapter's failure does not stop the other chapters.
+                        failures[unit_id]='%s: %s'%(u['title'],str(error)[:200]);continue
                     banks[unit_id]=questions
             while True:
                 latest=self.manifest(cid) or {}
@@ -1996,9 +2075,14 @@ class CourseManager(object):
                         model_key,timed_model_call,save_expansion,QUESTION_TARGET)
                 self._update_manifest(cid,lambda current,uid=unit_id:current['preparation']['questions'].update({
                     'expansion_requests':[x for x in current['preparation']['questions'].get('expansion_requests',[]) if x!=uid]}))
-            missing=[u['title'] for u in m['units'] if not u.get('source_blocked') and len(banks.get(u['id']) or [])<2]
+            missing=[u for u in m['units'] if not u.get('source_blocked') and len(banks.get(u['id']) or [])<2]
             if missing:
-                raise RuntimeError('Fewer than two reviewed questions in: '+', '.join(missing[:4])+'. Ready units can still be practised; review the PDF text or retry with another model.')
+                usable=sum(not u.get('source_blocked') for u in m['units']);ready=usable-len(missing)
+                why='; '.join(failures.get(u['id']) or '%s: fewer than two questions passed review'%u['title'] for u in missing[:4])
+                self._update_manifest(cid,lambda current:(current.update({'status':'ready' if current.get('ingestion_complete',True) else 'preparing'}),
+                    current['preparation']['questions'].update({'status':'partial','ready_units':ready,'error':why[:1000],
+                        'message':'%s / %s units have practice questions; %s are tried again automatically'%(ready,usable,len(missing))})))
+                return
             usable=sum(not u.get('source_blocked') for u in m['units'])
             self._update_manifest(cid,lambda current:(current.update({'status':'ready' if current.get('ingestion_complete',True) else 'preparing','question_generation':QUESTION_GENERATION}),
                 current['preparation']['questions'].update({'status':'ready','completed_units':usable,'total_units':usable,
