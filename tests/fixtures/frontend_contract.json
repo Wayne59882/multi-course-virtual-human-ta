@@ -208,8 +208,8 @@
       },
       {
         "old": "js/55_v241_course_adaptive_ta.js",
-        "query": "v=R21-20261111",
-        "sha256": "55c720956a2a28c12016d6d29cc365a103c37bf820b5a42fa7c3dccb63c17092",
+        "query": "v=R22-20261111",
+        "sha256": "ee536e8c50779f7732577b9226523680b08391dcc194a22ef5a8c3c39f9af1f2",
         "new": "shared/js/course/course-controller.js",
         "previous_sha256": "96649e4f26ec6837ab91663f86947affecf4cc1ebe8cd8f6162c509e91f894d2"
       },
@@ -498,8 +498,8 @@
       },
       {
         "old": "js/55_v241_course_adaptive_ta.js",
-        "query": "v=R21-20261111",
-        "sha256": "55c720956a2a28c12016d6d29cc365a103c37bf820b5a42fa7c3dccb63c17092",
+        "query": "v=R22-20261111",
+        "sha256": "ee536e8c50779f7732577b9226523680b08391dcc194a22ef5a8c3c39f9af1f2",
         "new": "shared/js/course/course-controller.js",
         "previous_sha256": "96649e4f26ec6837ab91663f86947affecf4cc1ebe8cd8f6162c509e91f894d2"
       },

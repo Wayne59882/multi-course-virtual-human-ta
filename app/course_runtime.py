@@ -837,6 +837,17 @@ def _source_excerpt_lecture(unit,chunks,limit=12):
 def _lecture_retryable(error):
     return isinstance(error,(RejectedLecture,GroundingError)) or 'did not finish' in str(error)
 
+
+_TRANSPORT_WORDS=('stream ended before completion','connection','timed out','timeout','unavailable','http 5','refused','reset by peer','busy')
+
+def _content_failure(unit):
+    """Did this chapter's lecture fail on content (rejected writing) rather than on
+    a model or connection problem? Only content failures count as attempts."""
+    kind=unit.get('script_failure')
+    if kind:return kind=='content'
+    text=str(unit.get('script_error') or '').lower()
+    return bool(text) and not any(word in text for word in _TRANSPORT_WORDS)
+
 def _chinese_lecture(unit,chunks,model_key,model_call,course_name='',variant=0):
     max_chars,instruction,quality=LECTURE_VARIANTS[max(0,min(int(variant),len(LECTURE_VARIANTS)-1))]
     evidence=_lecture_evidence(unit,chunks,max_chars,quality)
@@ -1169,6 +1180,9 @@ class CourseManager(object):
             for kind in ('questions','lectures','index','figures'):
                 info=prep.get(kind) or {}
                 retries=int(info.get('auto_retries') or 0)
+                done=int(info.get('ready_units') if info.get('ready_units') is not None else info.get('completed_units') or 0)
+                if retries and done>int(info.get('auto_retry_done') or 0):
+                    retries=0;reset.append(kind)   # the last retry made progress: keep going
                 if info.get('status')=='ready':
                     if retries:reset.append(kind)
                     continue
@@ -1177,10 +1191,11 @@ class CourseManager(object):
                 kinds.append(kind)
             if not kinds and not reset:continue
             def mark(current,kinds=tuple(kinds),reset=tuple(reset)):
+                for kind in reset:current['preparation'][kind]['auto_retries']=0
                 for kind in kinds:
                     row=current.setdefault('preparation',{}).setdefault(kind,{})
-                    row.update({'auto_retries':int(row.get('auto_retries') or 0)+1,'auto_retry_at':now})
-                for kind in reset:current['preparation'][kind]['auto_retries']=0
+                    done=row.get('ready_units') if row.get('ready_units') is not None else row.get('completed_units')
+                    row.update({'auto_retries':int(row.get('auto_retries') or 0)+1,'auto_retry_at':now,'auto_retry_done':int(done or 0)})
             self._update_manifest(cid,mark)
             if kinds:
                 started.append((cid,tuple(kinds)))
@@ -1750,12 +1765,14 @@ class CourseManager(object):
                     if unit.get('script_kind')=='source_excerpts' and unit.get('script_evidence')!=fingerprint(unit):return True
                     with guard:state['completed']+=1
                     return False
-                if unit.get('script_status')=='error' and unit.get('script_evidence')==fingerprint(unit):
+                if unit.get('script_status')=='error' and unit.get('script_evidence')==fingerprint(unit) and _content_failure(unit):
                     # Same evidence already failed every variant: try once more on the final pass.
-                    if not final or int(unit.get('script_attempts') or 0)>=2:
+                    if not final:
                         with guard:state['errors'].append('%s: %s'%(unit['title'],unit.get('script_error') or 'not ready'))
                         return False
-                return True
+                    if int(unit.get('script_attempts') or 0)>=2:
+                        return 'excerpts'   # rejected twice: the chapter's own key sentences, no model call
+                return True   # never tried, new material, or stopped by a model/connection problem
 
             def take():
                 with guard:
@@ -1785,8 +1802,8 @@ class CourseManager(object):
                             'script':value,'script_status':'ready','script_error':'','script_review_revision':REVIEW_REVISION,
                             'script_variant':v,'script_evidence':evidence,'script_kind':'written'}))
                         return
-                attempts=int(unit.get('script_attempts') or 0)+1
                 content_failure=isinstance(last,MissingLectureSource) or _lecture_retryable(last)
+                attempts=int(unit.get('script_attempts') or 0)+(1 if content_failure else 0)
                 if unit.get('script_kind')=='source_excerpts' and not content_failure:
                     with guard:state['completed']+=1
                     return   # model unavailable: the key sentences stay until the next try
@@ -1800,15 +1817,27 @@ class CourseManager(object):
                             'script_kind':'source_excerpts','script_evidence':evidence,'script_attempts':a}))
                         return
                 with guard:state['errors'].append('%s: %s'%(unit['title'],last))
-                self._update_manifest(cid,lambda m,n=i,err=str(last),missing=isinstance(last,MissingLectureSource),a=attempts:m['units'][n].update({
+                self._update_manifest(cid,lambda m,n=i,err=str(last),missing=isinstance(last,MissingLectureSource),a=attempts,kind='content' if content_failure else 'transport':m['units'][n].update({
                     'script':'','script_status':'error','script_error':err,'script_needs_source':missing,'script_evidence':evidence,
-                    'script_attempts':a}))
+                    'script_attempts':a,'script_failure':kind}))
+
+            def excerpt(i):
+                unit=units[i];text=_source_excerpt_lecture(unit,grouped.get(unit['id'],[]))
+                if not text:
+                    with guard:state['errors'].append('%s: %s'%(unit['title'],unit.get('script_error') or 'not ready'))
+                    return
+                with guard:state['completed']+=1
+                self._update_manifest(cid,lambda m,n=i,value=text,evidence=fingerprint(unit):m['units'][n].update({
+                    'script':value,'script_status':'ready','script_error':'','script_review_revision':REVIEW_REVISION,
+                    'script_kind':'source_excerpts','script_evidence':evidence}))
 
             def worker():
                 while True:
                     i=take()
                     if i is None:return
-                    if wanted(units[i]):write(i)
+                    choice=wanted(units[i])
+                    if choice=='excerpts':excerpt(i)
+                    elif choice:write(i)
                     with guard:done=state['completed']
                     self._update_manifest(cid,lambda m,done=done:m['preparation']['lectures'].update({'completed_units':done,'total_units':len(units),'message':'Chinese lectures ready: %s / %s'%(done,len(units))}))
 
@@ -1945,8 +1974,27 @@ class CourseManager(object):
                    ocr_pages_replaced=totals['replaced'],
                    message='Figures read on %s / %s pages; %s figure passages added to course Q&A'%(read,len(pages),totals['added'])+
                    ('; reviewed readings replaced interim OCR text on %s pages'%totals['replaced'] if totals['replaced'] else ''))
+            if totals['added'] or totals['replaced']:self._after_new_material(cid,model_key,model_call)
         except CourseDeleted:raise
         except Exception as e:status(status='error',error=str(e)[:400],message='Figure reading stopped; text-based course content remains available')
+
+    def _after_new_material(self,cid,model_key,model_call):
+        """Figure readings added course material: chapters still without a written
+        lecture or practice questions are tried again with it."""
+        m=self.manifest(cid) or {};prep=m.get('preparation') or {}
+        excerpts=any(u.get('script_kind')=='source_excerpts' for u in m.get('units') or [])
+        lectures=(prep.get('lectures') or {}).get('status') in ('partial','error') or excerpts
+        questions=(prep.get('questions') or {}).get('status') in ('partial','error')
+        if not (lectures or questions):return
+        def reset(current):
+            for kind in ('lectures','questions'):
+                row=(current.get('preparation') or {}).get(kind)
+                if row is not None:row['auto_retries']=0
+            for unit in current.get('units') or []:
+                if unit.get('script_status')=='error':unit['script_attempts']=0
+        self._update_manifest(cid,reset)
+        if lectures:self._start_preparation(cid,model_key,model_call,force=True,only=('lectures',))
+        if questions:self._start_preparation(cid,model_key,model_call,only=('questions',))
 
     def _drop_indexed_chunks(self,cid,ids=None):
         """Remove replaced passages from the semantic index (text search reads chunks.jsonl).

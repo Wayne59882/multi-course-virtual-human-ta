@@ -83,7 +83,14 @@ spaced excerpt made of complete sentences (slide keywords read by OCR are left
 out) and a tighter five-paragraph structure. A chapter whose lecture is
 rejected on two passes gets the chapter's own key sentences, evenly spaced and
 unchanged, as its lecture text; a written lecture is tried again when new
-material for the chapter arrives (for example figure readings). While later chapters are
+material for the chapter arrives (for example figure readings).
+
+A chapter stopped by a model or connection problem is written again; only
+rejected writing counts as an attempt. Automatic retries continue as long as
+each one makes progress, and when figure readings add material, chapters
+still without a written lecture or practice questions are tried again with
+it. The course card shows progress only; the reasons stay in each row's
+tooltip. While later chapters are
 still being extracted, a chapter that failed every variant waits for the final
 pass instead of being retried after each new chapter; it gets one more full set
 of variants on the final pass. The lecture output limit is

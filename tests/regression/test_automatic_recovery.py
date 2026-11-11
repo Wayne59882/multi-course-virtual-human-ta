@@ -110,6 +110,37 @@ with tempfile.TemporaryDirectory() as temporary:
     assert manager.manifest('course')['preparation']['lectures']['status']=='ready'
     assert lecture_calls()==0
 
+    # -- a model/connection problem never counts as a failed attempt --------
+    manager._update_manifest('course',lambda m:m['units'][1].update(script='',script_status='error',script_attempts=2,
+        script_error='Ollama stream ended before completion',script_failure=None,script_kind=None))
+    assert lecture_calls()>0,'a chapter stopped by the model server is written again'
+    assert manager.manifest('course')['units'][1]['script_status']=='ready'
+    # A chapter rejected twice before the fallback existed gets its key sentences without another model call.
+    manager._update_manifest('course',lambda m:m['units'][1].update(script='',script_status='error',script_attempts=2,
+        script_error='The local model did not produce a readable Traditional Chinese lecture.',script_failure='content',
+        script_evidence=None))
+    lecture_calls()
+    second=manager.manifest('course')['units'][1]
+    assert second['script_status']=='ready',second
+
+    # -- automatic retries continue while they make progress ----------------
+    progress_restarts=[]
+    real_start=manager._start_preparation
+    manager._start_preparation=lambda cid,key,call,force=False,only=None:progress_restarts.append(only)
+    manager._update_manifest('course',lambda m:m['preparation'].update(
+        questions={'status':'partial','ready_units':13,'auto_retries':3,'auto_retry_done':12,'auto_retry_at':0}))
+    assert manager._retry_stopped(model_call,now=10**9)==[('course',('questions',))],'progress since the last retry: keep retrying'
+    manager._update_manifest('course',lambda m:m['preparation']['questions'].update(auto_retries=3))
+    assert manager._retry_stopped(model_call,now=10**9+10**6)==[],'no progress after three retries: stop'
+    # New material from figure readings: chapters without questions or a written lecture are tried again.
+    progress_restarts.clear()
+    manager._update_manifest('course',lambda m:m['units'][0].update(script_kind='source_excerpts'))
+    manager._after_new_material('course','gemma',model_call)
+    assert ('lectures',) in progress_restarts and ('questions',) in progress_restarts
+    assert manager.manifest('course')['preparation']['questions']['auto_retries']==0
+    manager._update_manifest('course',lambda m:(m['units'][0].update(script_kind='written'),m['preparation']['questions'].update(status='ready')))
+    del manager._start_preparation
+
     # -- cleaner lecture material ---------------------------------------------
     fragments='Gene\nexpression\nRNA-seq\nreads\nalignment\nFold change\np < 0.05\nHeatmap'
     sentences='RNA sequencing measures how strongly each gene is expressed in a sample. Reads are aligned to the genome before they are counted for every gene.'
@@ -230,26 +261,28 @@ with tempfile.TemporaryDirectory() as temporary:
     manager._wait_for_lectures=lambda cid:None
     manager._index_missing_chunks=lambda cid:0
     manager._drop_indexed_chunks=lambda cid,ids=None:None
+    new_material=[];manager._after_new_material=lambda cid,key,call:new_material.append(cid)
     with patch.object(cr,'LocalVision',StandInVision):
         manager._prepare_figures('course','gemma',model_call)
         figures=manager.manifest('course')['preparation']['figures']
         assert figures['status']=='ready' and figures['pages_read']==1 and figures['pages_unverified']==1,figures
         assert reads==[1,2]
+        assert new_material==['course'],'figure passages make stalled chapters try again'
         reads.clear();manager._prepare_figures('course','gemma',model_call)
         assert reads==[],'pages are not read again with the same model'
+    del manager._after_new_material
 
     # -- stopped preparation starts again by itself -------------------------
     restarts=[]
     manager._start_preparation=lambda cid,key,call,force=False,only=None:restarts.append(only)
     manager._update_manifest('course',lambda m:m['preparation'].update(
         questions={'status':'error','error':'Selected model could not draft exam questions: connection refused'},
-        index={'status':'ready','auto_retries':2}))
+        index={'status':'ready','auto_retries':2},lectures={'status':'ready'}))
     period=cr.PREPARATION_RETRY_SECONDS
-    # (lectures is still 'error' from the chapter that failed every variant above: re-checking it costs no model call)
-    assert manager._retry_stopped(model_call,now=10000)==[('course',('questions','lectures'))]
+    assert manager._retry_stopped(model_call,now=10000)==[('course',('questions',))]
     assert manager._retry_stopped(model_call,now=10000+period)==[],'waits longer after each retry'
-    assert manager._retry_stopped(model_call,now=10000+2*period+1)==[('course',('questions','lectures'))]
-    assert manager._retry_stopped(model_call,now=10000+7*period)==[('course',('questions','lectures'))]
+    assert manager._retry_stopped(model_call,now=10000+2*period+1)==[('course',('questions',))]
+    assert manager._retry_stopped(model_call,now=10000+7*period)==[('course',('questions',))]
     assert manager._retry_stopped(model_call,now=10000+100*period)==[],'at most three automatic retries'
     prep=manager.manifest('course')['preparation']
     assert prep['questions']['auto_retries']==cr.PREPARATION_RETRIES and prep['index']['auto_retries']==0

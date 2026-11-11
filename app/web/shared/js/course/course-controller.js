@@ -253,9 +253,6 @@ function showPreparation(){
   const body=$('v241QuizBody');if(body&&!body.dataset.error&&!quizState&&!(btn&&btn.dataset.loading))body.textContent=quizReady()?(q.status==='error'?'Ready units can be practised now. Further preparation stopped: '+String(q.error||'Unknown error')+'. Use Retry Background Preparation to add more.':'Choose one ready unit or all ready units and start now. Other chapters continue preparing in the background.'):q.status==='error'?'Question bank preparation stopped: '+String(q.error||'Unknown error')+'. Ready units remain available.':'Course Q&A is active. Practice questions are being prepared by chapter.';
   showSelectedLectureIntro();
   let note='';
-  // Only pages with no readable text are mentioned; pages read by OCR are usable.
-  if(manifest.source_review){const review=manifest.source_review,unread=review.unread_pages!=null?Number(review.unread_pages):Object.values(review.units||{}).flatMap(q=>q.warnings||[]).filter(page=>page.status==='needs_review').length;
-    if(unread>0)note=unread+' 頁讀不到文字（例如空白頁或純圖片頁）'+(Number(review.retryable_pages||0)>0?'，系統會自動再讀一次。':'，其他內容不受影響。');}
   renderPrep(note);
   if(prep.sources&&prep.sources.status==='preparing'){if(retry)retry.disabled=true;}else if(retry)retry.disabled=false;
 }
@@ -268,25 +265,23 @@ function renderPrep(note){
   const box=$('v241Prep');if(!box)return;if(!manifest){box.hidden=true;return;}
   const prep=manifest.preparation||{},units=manifest.units||[],q=prep.questions||{},lec=prep.lectures||{},idx=prep.index||{},src=prep.sources||{};
   const pct=(a,b)=>100*Number(a||0)/Math.max(1,Number(b||0));
-  // 'partial': most chapters are ready and the rest are tried again automatically.
+  // 'partial': most chapters are ready and the rest are tried again automatically,
+  // so it is shown as ordinary progress, not as an error.
   const settled=x=>x.status==='ready'||(x.status==='partial'&&Number(x.auto_retries||0)>=3);
-  const state=(st,x)=>st==='ready'?'done':st==='error'||(st==='partial'&&x&&settled(x))?'error':(!st||st==='waiting'||st==='queued'||st==='source_review')?'waiting':'working';
+  const state=(st,x)=>st==='ready'?'done':st==='error'?'error':(!st||st==='waiting'||st==='queued'||st==='source_review'||(st==='partial'&&x&&settled(x)))?'waiting':'working';
   // A stopped step is retried automatically a few times before it waits for Retry.
-  const stoppedLabel=x=>Number(x.auto_retries||0)<3?'Stopped · retrying automatically':'Stopped · use Retry',rows=[],reasons=[];
-  const reason=(label,x)=>{if(x.error&&(x.status==='error'||x.status==='partial'))reasons.push(label+(x.status==='error'?' stopped: ':' — not ready yet: ')+String(x.error).slice(0,180));};
+  const stoppedLabel=x=>Number(x.auto_retries||0)<3?'Retrying automatically':'Stopped · use Retry',rows=[];
   if(src.status==='preparing')rows.push(prepRow('Re-reading unreadable pages','working',src.total?`${Number(src.completed||0)} / ${src.total} pages`:'Working',pct(src.completed,src.total),src.message));
   rows.push(prepRow('Course Q&A','done','Ready',100));
   const ready=q.ready_units!=null?Number(q.ready_units):units.filter(u=>Number(u.question_count||0)>=2).length;
-  rows.push(prepRow('Practice questions',state(q.status,q),q.status==='error'?stoppedLabel(q):`${ready} / ${units.length} units`,q.status==='ready'?100:pct(ready,units.length),q.status==='error'?q.error:q.message));reason('Practice questions',q);
+  rows.push(prepRow('Practice questions',state(q.status,q),q.status==='error'?stoppedLabel(q):`${ready} / ${units.length} units`,q.status==='ready'?100:pct(ready,units.length),q.error||q.message));
   const total=Number(lec.total_units||units.length),scripts=lec.completed_units!=null?Number(lec.completed_units):units.filter(u=>u.script_status==='ready').length;
-  rows.push(prepRow('Chinese lecture scripts',state(lec.status,lec),lec.status==='error'?stoppedLabel(lec):`${scripts} / ${total} units`,lec.status==='ready'?100:pct(scripts,total),lec.status==='error'?lec.error:lec.message));reason('Chinese lecture scripts',lec);
-  rows.push(prepRow('Semantic search',state(idx.status,idx),idx.status==='ready'?'Ready':idx.status==='error'?stoppedLabel(idx):idx.total?Math.round(pct(idx.completed,idx.total))+'%':'Waiting',idx.status==='ready'?100:pct(idx.completed,idx.total),idx.message));reason('Semantic search',idx);
+  rows.push(prepRow('Chinese lecture scripts',state(lec.status,lec),lec.status==='error'?stoppedLabel(lec):`${scripts} / ${total} units`,lec.status==='ready'?100:pct(scripts,total),lec.error||lec.message));
+  rows.push(prepRow('Semantic search',state(idx.status,idx),idx.status==='ready'?'Ready':idx.status==='error'?stoppedLabel(idx):idx.total?Math.round(pct(idx.completed,idx.total))+'%':'Waiting',idx.status==='ready'?100:pct(idx.completed,idx.total),idx.error||idx.message));
   const finished=[q,lec,idx].every(settled)&&manifest.ingestion_complete!==false&&src.status!=='preparing';
   const others=activity&&Number(activity.other_courses||0)+Number(activity.other_builds||0);
   const line=[note,!finished&&others?'Other courses are also preparing; the model takes turns, and the course open here goes first.':''].filter(Boolean).join(' ');
-  // Why a step stopped is shown, not hidden in a tooltip.
-  const why=reasons.map(text=>`<div class="v241-prep-note">${esc(text)}</div>`).join('');
-  box.innerHTML=`<div class="v241-prep-head"><b>${esc(manifest.course_name)}</b><span class="v241-prep-${finished?'done':'working'}">${finished?'Ready':'Preparing'}</span></div>${rows.join('')}${why}${line?`<div class="v241-prep-note">${esc(line)}</div>`:''}`;
+  box.innerHTML=`<div class="v241-prep-head"><b>${esc(manifest.course_name)}</b><span class="v241-prep-${finished?'done':'working'}">${finished?'Ready':'Preparing'}</span></div>${rows.join('')}${line?`<div class="v241-prep-note">${esc(line)}</div>`:''}`;
   box.hidden=false;
 }
 async function retryPreparation(){if(!manifest)return;const b=$('v241RetryPrep');b.disabled=true;try{const r=await fetch('/api/reference/course-retry-preparation',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({course_id:manifest.course_id,model_key:modelKey()}),cache:'no-store'}),d=await r.json();if(!r.ok||!d.ok)throw new Error(d.detail||d.error||'Retry failed');manifest=d.manifest;showPreparation();}catch(e){setBuildStatus('Could not restart preparation: '+String(e&&e.message||e),'error');}finally{b.disabled=false;}}
