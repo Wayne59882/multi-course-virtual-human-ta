@@ -9,13 +9,6 @@ for(const site of ['reference','kb']){
   const worker=fs.readFileSync('cloudflare/worker/src/index.js','utf8');
   vm.runInNewContext(worker.slice(worker.indexOf('function cleanCourseAnswer('),worker.indexOf('function cleanStudentAnswer('))+'\nthis.cleanCloud=cleanCourseAnswer;',context);
   for(const text of samples)assert.equal(context.cleanCloud(text),text);
-  vm.runInNewContext(worker.slice(worker.indexOf('function validateCourseReview('),worker.indexOf('async function courseAnswer('))+'\nthis.validateSource=validateCourseReview;',context);
-  for(const text of samples){
-    const review={approved:true,task_in_scope:true,paragraphs:[{index:1,supported:true,quote:text}]};
-    assert.equal(context.validateSource(text,text,review),text);
-    assert.throws(()=>context.validateSource(text,text,{...review,task_in_scope:false}));
-    assert.throws(()=>context.validateSource(text,text,{...review,paragraphs:[{index:1,supported:true,quote:'A quote from an unrelated course.'}]}));
-  }
   const courseBranch=worker.slice(worker.indexOf('async function courseAnswer('),worker.indexOf('\nasync function proxy('));
   assert(!courseBranch.includes('cleanStudentAnswer('),'uploaded courses must bypass the physiology sanitizer');
   const lecture=fs.readFileSync(`web/shared/js/speech/recognition-controller.js`,'utf8');

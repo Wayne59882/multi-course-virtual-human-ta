@@ -111,6 +111,7 @@ def main():
         ("All-course text integrity", [sys.executable,str(TESTS / "test_content_integrity.py")]),
         ("Math integrity", [sys.executable,str(TESTS / "test_math_integrity.py")]),
         ("All-course display", [node,str(TESTS / "test_content_display.cjs")]),
+        ("Cloud course answer check", [node,str(TESTS / "test_cloud_course_answer.cjs")]),
         ("Math and audio lifecycle", [node,str(TESTS / "test_math_audio.cjs")]),
         ("Large PDF and private upload diagnostics", [sys.executable,str(TESTS / "test_large_pdf.py")]),
         ("Teaching-unit names and page ranges", [sys.executable,str(TESTS / "test_unit_detection.py")]),
