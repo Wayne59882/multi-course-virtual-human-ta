@@ -773,18 +773,36 @@ def _lecture_evidence(unit,chunks,max_chars=6200,min_quality=0.0):
     return '\n\n'.join(picked)
 
 
-def _waiting_units(manifest):
-    """Chapters that still lack a written lecture or practice questions. Their
-    pages are read first by the figure step and they are written again as soon
-    as their pages have been read."""
-    waiting=set()
-    for unit in (manifest or {}).get('units') or []:
-        if unit.get('source_blocked'):continue
-        lecture=unit.get('script_status')!='ready' or unit.get('script_kind')=='source_excerpts'
-        if unit.get('script_status')=='skipped':lecture=False
-        questions=int(unit.get('question_count') or 0)<2 and not unit.get('question_skipped')
-        if lecture or questions:waiting.add(unit['id'])
-    return waiting
+def _neighbor_chunks(units,by_unit,index,budget=4200):
+    """Readable passages of the chapters around chapter `index` (nearest first, then in
+    course order). A chapter that is mostly slide images gives only keywords; the text
+    of the chapters before and after it is the context its lecture and questions use,
+    instead of reading the images harder."""
+    picked=[]
+    for threshold in (0.45,0.25):
+        picked=[];used=0
+        for distance in range(1,5):
+            for side in (-1,1):
+                j=index+side*distance
+                if j<0 or j>=len(units) or units[j].get('source_blocked'):continue
+                for k,row in enumerate(by_unit.get(units[j]['id'],[])):
+                    text=str(row.get('text') or '').strip()
+                    if not text or text_issues(text) or _passage_quality(text)<threshold or used+len(text)+2>budget:continue
+                    picked.append((j,k,row));used+=len(text)+2
+            if used>=budget*0.8:break
+        if used>=600:break
+    return [row for _,_,row in sorted(picked,key=lambda item:(item[0],item[1]))]
+
+
+def _own_sentence_text(chunks):
+    return sum(len(str(c.get('text') or '')) for c in chunks if _passage_quality(c.get('text'))>=0.25)
+
+
+def _context_evidence(own,near,max_chars=6200):
+    mine=_lecture_evidence({},own,1500,0.0)
+    around=_lecture_evidence({},near,max(0,max_chars-len(mine)-60),0.25)
+    if not around:return mine
+    return ('【本章擷取（投影片多為圖片，只留下關鍵詞）】\n'+mine+'\n\n' if mine else '')+'【前後章節教材】\n'+around
 
 
 class RejectedLecture(RuntimeError):pass
@@ -823,6 +841,9 @@ LECTURE_VARIANTS=(
     (4600,'請寫 5 段繁體中文講稿，每段 3 至 5 句：先定義核心概念，再用教材中的例子解釋機轉，最後歸納。只寫教材明確支持的內容，全部使用繁體中文。',0.45),
     (3400,'請寫 5 段精簡的繁體中文講稿，每段 2 至 4 句，只解釋下面摘錄中明確寫出的概念與機轉，最後一段歸納。不確定的內容一律省略。',0.6),
 )
+
+# Chapter that is mostly slide images: written from its own keywords and the text around it.
+LECTURE_CONTEXT=(6200,'本章的投影片多為圖片，文字擷取只留下關鍵詞（見「本章擷取」）。請以這些關鍵詞為主題，只依據「前後章節教材」中明確寫出的相關說明，寫 5 段繁體中文講稿：先說明主題，再解釋相關概念，最後歸納。教材沒有明確支持的內容一律省略。',0.25)
 
 
 def _source_excerpt_lecture(unit,chunks,limit=12):
@@ -883,9 +904,13 @@ def _content_failure(unit):
     text=str(unit.get('script_error') or '').lower()
     return bool(text) and not any(word in text for word in _TRANSPORT_WORDS)
 
-def _chinese_lecture(unit,chunks,model_key,model_call,course_name='',variant=0):
-    max_chars,instruction,quality=LECTURE_VARIANTS[max(0,min(int(variant),len(LECTURE_VARIANTS)-1))]
-    evidence=_lecture_evidence(unit,chunks,max_chars,quality)
+def _chinese_lecture(unit,chunks,model_key,model_call,course_name='',variant=0,context=None):
+    if context is not None:
+        max_chars,instruction,quality=LECTURE_CONTEXT
+        evidence=_context_evidence(chunks,context,max_chars)
+    else:
+        max_chars,instruction,quality=LECTURE_VARIANTS[max(0,min(int(variant),len(LECTURE_VARIANTS)-1))]
+        evidence=_lecture_evidence(unit,chunks,max_chars,quality)
     if len(evidence)<180:raise MissingLectureSource('This chapter has too little readable text to make a Chinese lecture yet; its pages are read again automatically.')
     system=('你是'+(_clean_text(course_name) or '目前上傳課程')+'課程的教學助理。以繁體中文撰寫可直接朗讀的課堂講稿。'
             '所有事實只能來自提供的教材，保留藥名、數值、公式與重要英文專有名詞。'
@@ -1823,14 +1848,21 @@ class CourseManager(object):
             def write(i):
                 unit=units[i];evidence=fingerprint(unit);last=None
                 self._update_manifest(cid,lambda m,n=i:m['preparation']['lectures'].update({'status':'preparing','message':'Writing Chinese lecture %s / %s'%(n+1,len(units)),'error':''}))
-                for variant in range(len(LECTURE_VARIANTS)):
+                own=grouped.get(unit['id'],[])
+                # A chapter that is mostly slide images has only keywords: it is written from those and
+                # the text of the chapters around it (no forced image reading), then the usual variants.
+                plan=['context',0] if _own_sentence_text(own)<400 else list(range(len(LECTURE_VARIANTS)))
+                for variant in plan:
                     self._alive(cid);steps_mark()
                     try:
-                        script=_chinese_lecture(unit,grouped.get(unit['id'],[]),model_key,model_call,course_name,variant)
+                        if variant=='context':script=_chinese_lecture(unit,own,model_key,model_call,course_name,0,context=_neighbor_chunks(units,grouped,i))
+                        else:script=_chinese_lecture(unit,own,model_key,model_call,course_name,variant)
                     except CourseDeleted:raise
                     except Exception as error:
                         last=error
-                        if isinstance(error,MissingLectureSource):break   # needs its pages read again
+                        if isinstance(error,MissingLectureSource):
+                            if variant=='context':continue
+                            break
                         if _lecture_retryable(error):
                             reject_steps();continue                        # ask differently
                         break                                              # model unavailable: later pass
@@ -1838,7 +1870,7 @@ class CourseManager(object):
                         with guard:state['completed']+=1
                         self._update_manifest(cid,lambda m,n=i,value=script,v=variant:m['units'][n].update({
                             'script':value,'script_status':'ready','script_error':'','script_review_revision':REVIEW_REVISION,
-                            'script_variant':v,'script_evidence':evidence,'script_kind':'written'}))
+                            'script_variant':v,'script_evidence':evidence,'script_kind':'context' if v=='context' else 'written'}))
                         return
                 content_failure=isinstance(last,MissingLectureSource) or _lecture_retryable(last)
                 attempts=int(unit.get('script_attempts') or 0)+(1 if content_failure else 0)
@@ -1917,13 +1949,6 @@ class CourseManager(object):
             self._wait_for_lectures(cid);self._alive(cid)
             m=self.manifest(cid) or {};pages=m.get('figure_pages') or []
             if not pages:return
-            # Chapters still without a written lecture or practice questions are read first
-            # (their pages are what is missing); each is written again as soon as its pages are read.
-            focus=_waiting_units(m)&{row['unit_id'] for row in pages}
-            pages=sorted(pages,key=lambda row:0 if row['unit_id'] in focus else 1)
-            unit_pages={}
-            for row in pages:unit_pages.setdefault(row['unit_id'],[]).append(row)
-            signalled=set();fresh_units=set()   # chapters with passages not yet handed to lecture/question writing
             vision=LocalVision()
             if not vision.probe():
                 status(status='unavailable',message='Figures on text pages were not read: '+vision.error);return
@@ -1964,7 +1989,6 @@ class CourseManager(object):
                         with cp.open('a',encoding='utf-8') as f:
                             for c in fresh:f.write(json.dumps(c,ensure_ascii=False)+'\n')
                 if stale:self._drop_indexed_chunks(cid,[c['id'] for c in stale])
-                fresh_units.update({c['unit_id'] for c in fresh}|{c['unit_id'] for c in stale})
                 totals['added']+=len(fresh);totals['replaced']+=len({(c['unit_id'],c.get('pdf_page')) for c in stale})
                 with self.running_lock:indexing=(cid,'index') in self.running
                 if final:
@@ -1976,14 +2000,6 @@ class CourseManager(object):
                     if final:self._drop_indexed_chunks(cid)  # an index built meanwhile may still hold replaced OCR passages
                 else:
                     with self.cache_lock:self.cache.pop(cid,None)  # text search sees new passages at once
-            def unit_read(uid):
-                return all((done.get('%s|%s'%(r['source_file'],r['page'])) or {}).get('ok') or (done.get('%s|%s'%(r['source_file'],r['page'])) or {}).get('exhausted') for r in unit_pages.get(uid,[]))
-            def chapter_read(uid):
-                """All pages of a waiting chapter are read: write its lecture and questions again now."""
-                signalled.add(uid);publish(False)
-                if uid in fresh_units:
-                    fresh_units.discard(uid);self._after_new_material(cid,model_key,model_call,units={uid})
-                status(focus_units=len(focus-signalled))
             shas={src.get('file_name'):src.get('sha256') for src in m.get('sources') or [] if src.get('sha256')}
             def shared(row):
                 sha=shas.get(row['source_file'])
@@ -2007,7 +2023,7 @@ class CourseManager(object):
                         try:done[key]=json.loads(shared(row).read_text(encoding='utf-8'));_json_dump(cache_path,done)  # read before (same PDF, same model)
                         except Exception:pass
                     if key not in done:
-                        status(status='preparing',completed=n-1,total=len(pages),focus_units=len(focus-signalled),message='Reading figures: page %s (%s / %s)'%(row['page'],n,len(pages)))
+                        status(status='preparing',completed=n-1,total=len(pages),message='Reading figures: page %s (%s / %s)'%(row['page'],n,len(pages)))
                         if row['source_file'] not in docs:docs[row['source_file']]=fitz.open(str(cd/'source'/row['source_file']))
                         result=vision.read(docs[row['source_file']][int(row['page'])-1])
                         done[key]={'ok':bool(result.get('ok')),'text':result.get('text','') if result.get('ok') else '','error':result.get('error','')[:240],
@@ -2016,7 +2032,6 @@ class CourseManager(object):
                         if done[key]['ok'] and shared(row) is not None:
                             shared(row).parent.mkdir(parents=True,exist_ok=True);_json_dump(shared(row),done[key])
                         if n%FIGURE_BATCH==0:publish(False)
-                    if row['unit_id'] in focus and row['unit_id'] not in signalled and unit_read(row['unit_id']):chapter_read(row['unit_id'])
             finally:
                 for doc in docs.values():doc.close()
             publish(True)
@@ -2030,11 +2045,10 @@ class CourseManager(object):
                    ocr_pages_replaced=totals['replaced'],
                    message='Figures read on %s / %s pages; %s figure passages added to course Q&A'%(read,len(pages),totals['added'])+
                    ('; reviewed readings replaced interim OCR text on %s pages'%totals['replaced'] if totals['replaced'] else ''))
-            status(focus_units=0)
             if totals['added'] or totals['replaced']:self._after_new_material(cid,model_key,model_call)
             self._settle(cid)
         except CourseDeleted:raise
-        except Exception as e:status(status='error',error=str(e)[:400],focus_units=0,message='Figure reading stopped; text-based course content remains available')
+        except Exception as e:status(status='error',error=str(e)[:400],message='Figure reading stopped; text-based course content remains available')
 
     def _after_new_material(self,cid,model_key,model_call,units=None):
         """Figure readings added course material: chapters still without a written
@@ -2196,8 +2210,12 @@ class CourseManager(object):
                                 'message':'%s / %s units playable; %s: %s reviewed questions, %s / %s source facts evaluated (%s)'%(
                                     ready,len(current['units']),unit_title,len(cards),processed,available,phase)})
                         self._update_manifest(cid,update)
+                    material=by_unit[unit_id]
+                    if len(_question_sentences(material))<4:
+                        # Mostly slide images: the text around the chapter is the context, not harder image reading.
+                        material=material+[dict(c,unit_id=unit_id) for c in _neighbor_chunks(m['units'],by_unit,idx)]
                     try:
-                        questions=build_exam_questions(u,by_unit[unit_id],_question_sentences,banks.get(unit_id) or [],
+                        questions=build_exam_questions(u,material,_question_sentences,banks.get(unit_id) or [],
                             model_key,timed_model_call,save_progress,target,max_new_facts=12 if target==2 else None)
                     except CourseDeleted:raise
                     except Exception as error:

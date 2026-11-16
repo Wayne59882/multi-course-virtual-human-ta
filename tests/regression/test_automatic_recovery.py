@@ -310,43 +310,61 @@ with tempfile.TemporaryDirectory() as temporary:
             try:oc.retry_transient(lambda:(_ for _ in ()).throw(TimeoutError('step limit')));raise AssertionError
             except TimeoutError:pass
 
-    # -- slide chapters: read first, written again when read, never stuck ---
+    # -- slide chapters: the text around them is the context, images are not forced ---
     folder_course=manager._course_dir('course')
-    source_name=manager.manifest('course')['sources'][0]['file_name']
-    manager._update_manifest('course',lambda m:(m.update(figure_pages=[{'unit_id':'unit%d'%n,'source_file':source_name,'page':n} for n in (1,2,3)]),
+    manager._update_manifest('course',lambda m:(
         m['units'][0].update(question_count=5,script_status='ready',script_kind='written',script_review_revision=cr.REVIEW_REVISION),
         m['units'][1].update(question_count=5,script_status='ready',script_kind='written',script_review_revision=cr.REVIEW_REVISION),
-        m['units'][2].update(question_count=0,script_status='error',script='',script_error='rejected',script_failure='content',script_kind=None)))
-    assert cr._waiting_units(manager.manifest('course'))=={'unit3'}
-    figure_cache=folder_course/'figure_cache.json'
-    if figure_cache.exists():figure_cache.unlink()
-    class SlideVision(object):
-        fingerprint='slides-1';error=''
-        def probe(self):return True
-        def read(self,page):
-            reads.append(page.number+1)
-            return {'ok':True,'text':'Slide %d: transcription is the process in which RNA polymerase copies a gene into messenger RNA, and the transcript is processed afterwards.'%(page.number+1)}
-    events=[];reads.clear()
-    manager._after_new_material=lambda cid,key,call,units=None:events.append((tuple(sorted(units)) if units else None,list(reads)))
-    with patch.object(cr,'LocalVision',SlideVision):
-        manager._prepare_figures('course','gemma',model_call)
-    assert reads==[3,1,2],'the chapter without a lecture is read first: %s'%reads
-    assert events[0]==(('unit3',),[3]),'it is written again as soon as its own pages are read: %s'%events
-    assert events[-1]==(None,[3,1,2])
-    assert manager.manifest('course')['preparation']['figures']['focus_units']==0
-    del manager._after_new_material
+        m['units'][2].update(question_count=0,script_status='error',script='',script_error='rejected',script_failure='content',script_kind=None,script_attempts=0)))
+    keywords='Transcription\nRNA polymerase\nPromoter\nmRNA\nSplicing\nIntrons and exons\nEnhancers'
+    prose=('Transcription copies a gene into messenger RNA. RNA polymerase binds the promoter and builds the transcript. '
+           'Introns are removed by splicing and the exons are joined into mature messenger RNA. ')*4
+    rows=[json.loads(x) for x in (folder_course/'chunks.jsonl').read_text(encoding='utf-8').splitlines() if x]
+    for row in rows:
+        row['text']=keywords if row['unit_id']=='unit3' else prose+row['unit_id']
+    (folder_course/'chunks.jsonl').write_text(''.join(json.dumps(row,ensure_ascii=False)+'\n' for row in rows),encoding='utf-8')
+    by_unit={}
+    for row in rows:by_unit.setdefault(row['unit_id'],[]).append(row)
+    units_now=manager.manifest('course')['units']
+    near=cr._neighbor_chunks(units_now,by_unit,2)
+    assert near and all(c['unit_id'] in ('unit1','unit2') for c in near),'the chapters before it, never its own keywords'
+    assert cr._neighbor_chunks(units_now,{'unit1':[{'text':keywords}],'unit2':[{'text':keywords}]},2)==[],'keywords are not context'
+    assert cr._own_sentence_text(by_unit['unit3'])==0 and cr._own_sentence_text(by_unit['unit1'])>400
+    evidence=cr._context_evidence(by_unit['unit3'],near)
+    assert evidence.index('Transcription\nRNA polymerase')<evidence.index('【前後章節教材】') and 'Introns are removed' in evidence
 
-    # Only the chapters whose pages were read are tried again.
-    started=[]
-    manager._start_preparation=lambda cid,key,call,force=False,only=None:started.append((force,only))
-    manager._update_manifest('course',lambda m:(m['preparation'].update(lectures={'status':'partial','auto_retries':3},questions={'status':'partial','auto_retries':3}),
-        m['units'][2].update(script_attempts=2),m['units'][1].update(script_status='error',script_attempts=2,script_kind=None)))
-    manager._after_new_material('course','gemma',model_call,units={'unit3'})
-    current=manager.manifest('course')
-    assert current['units'][2]['script_attempts']==0 and current['units'][1]['script_attempts']==2,'other chapters keep their count'
-    assert (True,('lectures',)) in started and (True,('questions',)) in started
+    # The lecture of such a chapter is written at once from that context (one model call), not after failed variants.
+    seen_calls=[]
+    def context_model(key,system,user,limit):
+        seen_calls.append(user)
+        return CHINESE
+    manager._update_manifest('course',lambda m:m.update(ingestion_complete=True))
+    with patch.object(cr,'review_text',lambda kind,script,*a,**k:(script,{})):
+        manager._prepare_lectures('course','gemma',context_model)
+    unit=manager.manifest('course')['units'][2]
+    assert unit['script_status']=='ready' and unit['script_kind']=='context' and unit['script_variant']=='context',unit
+    assert len(seen_calls)==1 and '【前後章節教材】' in seen_calls[0] and 'RNA polymerase' in seen_calls[0]
+    # A written chapter is not written again when images are read later.
+    started=[];manager._start_preparation=lambda cid,key,call,force=False,only=None:started.append(only)
+    manager._update_manifest('course',lambda m:m['preparation'].update(lectures={'status':'ready'},questions={'status':'ready'}))
+    manager._after_new_material('course','gemma',model_call)
+    assert started==[],'finished chapters are left alone'
     del manager._start_preparation
-    manager._update_manifest('course',lambda m:m['units'][1].update(script_status='ready',script_kind='written',script_attempts=0))
+
+    # Questions use the same context when a chapter has no sentences of its own.
+    manager._update_manifest('course',lambda m:m['units'][2].update(question_count=0))
+    material=[]
+    def build_context(unit,chunks,sentences,existing,key,call,save,target,max_new_facts=None):
+        material.append((unit['id'],list(chunks)))
+        cards=[{'question':{'generation_method':cr.QUESTION_GENERATION,'stem':'q%d'%n}} for n in range(target)]
+        save(cards,target,target);return cards
+    banks_path=folder_course/'question_banks.json';banks_path.write_text('{}',encoding='utf-8')
+    with patch.object(cr,'build_exam_questions',build_context):
+        manager._prepare_questions('course','gemma',model_call)
+    third=[chunks for uid,chunks in material if uid=='unit3'][0]
+    assert any('Introns are removed' in c['text'] for c in third) and all(c['unit_id']=='unit3' for c in third)
+    first=[chunks for uid,chunks in material if uid=='unit1'][0]
+    assert all(c['unit_id']=='unit1' for c in first),'chapters with their own sentences use only those'
 
     # A chapter that is still without lecture or questions after every retry and all its pages
     # were read is settled: counted out, and the course is complete.
@@ -365,7 +383,7 @@ with tempfile.TemporaryDirectory() as temporary:
     assert manager._settle('course')
     current=manager.manifest('course')
     assert current['preparation']['questions']['status']=='ready' and current['preparation']['questions']['ready_units']==2
-    assert current['units'][2]['question_skipped'] is True and cr._waiting_units(current)==set()
+    assert current['units'][2]['question_skipped'] is True
     # New material for a settled chapter writes it again; a settled chapter is not retried without any.
     started=[];manager._start_preparation=lambda cid,key,call,force=False,only=None:started.append(only)
     manager._after_new_material('course','gemma',model_call,units={'unit3'})
@@ -395,4 +413,4 @@ with tempfile.TemporaryDirectory() as temporary:
         oc.note_student_activity()
         assert cpu_budget.cpu_workers()==2
         with patch.dict(os.environ,{'VQ_CPU_BUSY_WINDOW_SEC':'0'}):assert cpu_budget.cpu_workers()==4
-print('PASS automatic recovery: slide chapters are read first, written again when read, finally settled (never stuck) and keep their own slide points as a lecture; one chapter never stops the others (partial), rejected lectures are asked differently with cleaner material and finally become the chapter key sentences, chapters prepare in parallel, failed chapters wait for the final pass, figures try crop/page/halves and never block, only pages with no text are re-read (once, not blank pages), Retry restarts only stopped steps, stopped steps restart by themselves (3 times, growing pauses), a restarting model server only pauses preparation, OCR 4 quiet / 2 busy')
+print('PASS automatic recovery: image-heavy chapters are written from the text around them (lecture and questions) without forced image reading, finally settled (never stuck) and keep their own slide points as a lecture; one chapter never stops the others (partial), rejected lectures are asked differently with cleaner material and finally become the chapter key sentences, chapters prepare in parallel, failed chapters wait for the final pass, figures try crop/page/halves and never block, only pages with no text are re-read (once, not blank pages), Retry restarts only stopped steps, stopped steps restart by themselves (3 times, growing pauses), a restarting model server only pauses preparation, OCR 4 quiet / 2 busy')

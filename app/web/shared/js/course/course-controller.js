@@ -276,11 +276,9 @@ function renderPrep(note){
   // Chapters settled with too little readable text are left out of the counts.
   const counted=units.filter(u=>!u.question_skipped).length;
   const ready=q.ready_units!=null?Number(q.ready_units):units.filter(u=>Number(u.question_count||0)>=2).length;
-  // Chapters whose slide images are being read right now (they are written again when read).
-  const slides=Number((prep.figures||{}).focus_units||0),slideNote=slides>0?` · ${slides} reading slides`:'';
-  rows.push(prepRow('Practice questions',state(q.status,q),q.status==='error'?stoppedLabel(q):`${ready} / ${counted} units${q.status==='ready'?'':slideNote}`,q.status==='ready'?100:pct(ready,counted),q.error||q.message));
+  rows.push(prepRow('Practice questions',state(q.status,q),q.status==='error'?stoppedLabel(q):`${ready} / ${counted} units`,q.status==='ready'?100:pct(ready,counted),q.error||q.message));
   const total=Number(lec.total_units||units.length),scripts=lec.completed_units!=null?Number(lec.completed_units):units.filter(u=>u.script_status==='ready').length;
-  rows.push(prepRow('Chinese lecture scripts',state(lec.status,lec),lec.status==='error'?stoppedLabel(lec):`${scripts} / ${total} units${lec.status==='ready'?'':slideNote}`,lec.status==='ready'?100:pct(scripts,total),lec.error||lec.message));
+  rows.push(prepRow('Chinese lecture scripts',state(lec.status,lec),lec.status==='error'?stoppedLabel(lec):`${scripts} / ${total} units`,lec.status==='ready'?100:pct(scripts,total),lec.error||lec.message));
   rows.push(prepRow('Semantic search',state(idx.status,idx),idx.status==='ready'?'Ready':idx.status==='error'?stoppedLabel(idx):idx.total?Math.round(pct(idx.completed,idx.total))+'%':'Waiting',idx.status==='ready'?100:pct(idx.completed,idx.total),idx.error||idx.message));
   const finished=[q,lec,idx].every(settled)&&manifest.ingestion_complete!==false&&src.status!=='preparing';
   const others=activity&&Number(activity.other_courses||0)+Number(activity.other_builds||0);
