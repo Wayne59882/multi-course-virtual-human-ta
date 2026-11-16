@@ -904,6 +904,11 @@ def _content_failure(unit):
     text=str(unit.get('script_error') or '').lower()
     return bool(text) and not any(word in text for word in _TRANSPORT_WORDS)
 
+def _lecture_fingerprint(rows):
+    """What a chapter's lecture was written from; a different text means new material."""
+    text='\n'.join(str(row.get('text') or '') for row in rows)
+    return hashlib.sha256(('%s|%s'%(REVIEW_REVISION,text)).encode('utf-8')).hexdigest()[:20]
+
 def _chinese_lecture(unit,chunks,model_key,model_call,course_name='',variant=0,context=None):
     if context is not None:
         max_chars,instruction,quality=LECTURE_CONTEXT
@@ -1804,6 +1809,9 @@ class CourseManager(object):
         """
         cd=self._course_dir(cid)
         try:
+            # Chapters the model already failed to write on this same text, after every automatic retry,
+            # get their key sentences now instead of waiting for another model attempt.
+            self._settle(cid,early=True)
             with self.manifest_lock:
                 rows=[json.loads(x) for x in (cd/'chunks.jsonl').read_text(encoding='utf-8').splitlines() if x]
                 manifest=self.manifest(cid);units=manifest['units']
@@ -1814,8 +1822,7 @@ class CourseManager(object):
             guard=threading.Lock();state={'completed':0,'errors':[],'pending':[]}
 
             def fingerprint(unit):
-                text='\n'.join(str(row.get('text') or '') for row in grouped.get(unit['id'],[]))
-                return hashlib.sha256(('%s|%s'%(REVIEW_REVISION,text)).encode('utf-8')).hexdigest()[:20]
+                return _lecture_fingerprint(grouped.get(unit['id'],[]))
 
             def finished(unit):
                 """Already done: counted at once, never visited again."""
@@ -2085,24 +2092,50 @@ class CourseManager(object):
         info=(m.get('preparation') or {}).get('figures') or {}
         return info.get('status') in ('ready','unavailable') or int(info.get('auto_retries') or 0)>=PREPARATION_RETRIES
 
-    def _settle(self,cid):
+    def _settle(self,cid,early=False):
         """A chapter that still has no lecture or practice questions after every
         automatic retry and after its pages were read in full is settled instead
         of staying "in progress" for ever: it is left out of the counts, and it is
-        written again if new material for it ever arrives (_after_new_material)."""
+        written again if new material for it ever arrives (_after_new_material).
+
+        A lecture the model could not write because of a model or connection problem
+        (not because the draft was rejected) is settled with the chapter's own key
+        sentences, which need no model, so the course never waits on it for ever.
+        early=True does only that, before another model attempt is made."""
         m=self.manifest(cid) or {}
         if m.get('ingestion_complete') is False or not self._figures_finished(m):return False
         prep=m.get('preparation') or {}
         def exhausted(kind):
             info=prep.get(kind) or {}
             return info.get('status')=='partial' and int(info.get('auto_retries') or 0)>=PREPARATION_RETRIES
-        lectures=exhausted('lectures');questions=exhausted('questions')
+        lectures=exhausted('lectures');questions=exhausted('questions') and not early
         if not (lectures or questions):return False
+        stalled={}
+        if lectures:
+            grouped={}
+            path=self._course_dir(cid)/'chunks.jsonl'
+            if path.exists():
+                for line in path.read_text(encoding='utf-8').splitlines():
+                    if line:
+                        row=json.loads(line);grouped.setdefault(row.get('unit_id'),[]).append(row)
+            for unit in m.get('units') or []:
+                if unit.get('source_blocked') or unit.get('script_status')!='error' or _content_failure(unit):continue
+                mine=grouped.get(unit['id'],[]);fingerprint=_lecture_fingerprint(mine)
+                if unit.get('script_evidence')!=fingerprint:continue   # new material: the model tries again
+                stalled[unit['id']]=(_source_excerpt_lecture(unit,mine),fingerprint)
         def settle(current):
             usable=[u for u in current.get('units') or [] if not u.get('source_blocked')]
             if lectures:
                 for unit in usable:
-                    if unit.get('script_status')=='error' and _content_failure(unit):unit['script_status']='skipped'
+                    if unit.get('script_status')!='error':continue
+                    if _content_failure(unit):
+                        if not early:unit['script_status']='skipped'
+                    elif unit['id'] in stalled:
+                        text,fingerprint=stalled[unit['id']]
+                        if text:
+                            unit.update({'script':text,'script_status':'ready','script_error':'','script_review_revision':REVIEW_REVISION,
+                                'script_kind':'source_excerpts','script_evidence':fingerprint,'script_failure':''})
+                        else:unit.update({'script_status':'skipped','script_evidence':fingerprint})
                 skipped=sum(u.get('script_status')=='skipped' for u in usable)
                 if not any(u.get('script_status')=='error' for u in usable):
                     ready=sum(u.get('script_status')=='ready' for u in usable)

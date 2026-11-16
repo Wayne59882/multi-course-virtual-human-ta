@@ -416,6 +416,35 @@ with tempfile.TemporaryDirectory() as temporary:
     assert unit['script'].startswith('Slide points from the course material') and 'RNA polymerase' in unit['script']
     assert manager.manifest('course')['preparation']['lectures']['status']=='ready'
 
+    # A chapter the model could not write because of a model or connection problem, after every automatic
+    # retry, ends with its own key sentences at once: no further model call, the course is complete.
+    rows=[json.loads(x) for x in (folder_course/'chunks.jsonl').read_text(encoding='utf-8').splitlines() if x]
+    mine=[row for row in rows if row['unit_id']=='unit1']
+    manager._update_manifest('course',lambda m:(m['units'][0].update(script_status='error',script='',script_failure='transport',
+        script_error='stream ended before completion',script_kind=None,script_evidence=cr._lecture_fingerprint(mine)),
+        m['preparation'].update(figures={'status':'ready'},lectures={'status':'partial','auto_retries':3,'completed_units':2,'total_units':3})))
+    asked=[]
+    def broken_model(key,system,user,limit):
+        asked.append(user);raise RuntimeError('stream ended before completion')
+    with patch.object(cr,'review_text',lambda kind,script,*a,**k:(script,{})):
+        manager._prepare_lectures('course','gemma',broken_model)
+    unit=manager.manifest('course')['units'][0]
+    assert not asked,'settled before any new model attempt'
+    assert unit['script_status']=='ready' and unit['script_kind']=='source_excerpts' and unit['script'],unit
+    lectures=manager.manifest('course')['preparation']['lectures']
+    assert lectures['status']=='ready' and lectures['completed_units']==3,lectures
+    # Retries not used up yet: the model gets its turns first.
+    manager._update_manifest('course',lambda m:(m['units'][0].update(script_status='error',script='',script_failure='transport',script_kind=None,
+        script_evidence=cr._lecture_fingerprint(mine)),m['preparation']['lectures'].update(status='partial',auto_retries=1)))
+    assert manager._settle('course',early=True) is False
+    assert manager.manifest('course')['units'][0]['script_status']=='error'
+    # New material for the chapter: the model tries again before any key sentences.
+    manager._update_manifest('course',lambda m:(m['units'][0].update(script_evidence='older text'),m['preparation']['lectures'].update(auto_retries=3)))
+    manager._settle('course',early=True)
+    assert manager.manifest('course')['units'][0]['script_status']=='error'
+    manager._update_manifest('course',lambda m:(m['units'][0].update(script_status='ready',script=CHINESE,script_kind='written',script_failure='',script_error=''),
+        m['preparation']['lectures'].update(status='ready')))
+
     # -- OCR: 4 at once while quiet, 2 while students ask -------------------
     with patch.object(cpu_budget,'available_cpus',lambda:8),patch.dict(os.environ,{'VQ_CPU_WORKERS':'4','VQ_CPU_WORKERS_BUSY':'2','VQ_CPU_BUSY_WINDOW_SEC':'5'}):
         quiet=Path(oc.ACTIVITY_PATH)
