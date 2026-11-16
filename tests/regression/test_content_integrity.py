@@ -68,6 +68,9 @@ try:
     calls.clear()
     rs.course_model_call=scripted(['This course explains how genes are transcribed and regulated across the genome in several chapters.','這門課說明基因如何被轉錄與調控。'])
     assert rs.course_local_answer(None,'gemma','這整本在講什麼','material','Genomics','zh-TW')=='這門課說明基因如何被轉錄與調控。'
+    calls.clear()
+    rs.course_model_call=scripted(['broken \ufffd answer','這門課說明基因如何被轉錄與調控。'])
+    assert rs.course_local_answer(None,'gemma','這整本在講什麼','material','Genomics','zh-TW')=='這門課說明基因如何被轉錄與調控。' and len(calls)==2,'a garbled answer is asked again once'
 finally:rs.course_model_call=old
 print('[OK] Uploaded-course local answers use the default flow: one draft, finished sentence, right language, no source-quote gate')
 

@@ -208,10 +208,10 @@
       },
       {
         "old": "js/55_v241_course_adaptive_ta.js",
-        "query": "v=R24-20261116",
-        "sha256": "582392dd92fd90914f95f707631b732c0ee362d74385d6388b136db20d77744e",
+        "query": "v=R24-20261116b",
+        "sha256": "f1971c54f0bc9105eb93ed67467b526e554c07b28caa3d9307fcd6b7c42e45e3",
         "new": "shared/js/course/course-controller.js",
-        "previous_sha256": "96649e4f26ec6837ab91663f86947affecf4cc1ebe8cd8f6162c509e91f894d2"
+        "previous_sha256": "582392dd92fd90914f95f707631b732c0ee362d74385d6388b136db20d77744e"
       },
       {
         "old": "js/57_role_access.js",
@@ -498,10 +498,10 @@
       },
       {
         "old": "js/55_v241_course_adaptive_ta.js",
-        "query": "v=R24-20261116",
-        "sha256": "582392dd92fd90914f95f707631b732c0ee362d74385d6388b136db20d77744e",
+        "query": "v=R24-20261116b",
+        "sha256": "f1971c54f0bc9105eb93ed67467b526e554c07b28caa3d9307fcd6b7c42e45e3",
         "new": "shared/js/course/course-controller.js",
-        "previous_sha256": "96649e4f26ec6837ab91663f86947affecf4cc1ebe8cd8f6162c509e91f894d2"
+        "previous_sha256": "582392dd92fd90914f95f707631b732c0ee362d74385d6388b136db20d77744e"
       },
       {
         "old": "js/57_role_access.js",

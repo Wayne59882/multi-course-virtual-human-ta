@@ -1840,7 +1840,9 @@ class CourseManager(object):
         try:
             # Chapters the model already failed to write on this same text, after every automatic retry,
             # get their key sentences now instead of waiting for another model attempt.
-            self._settle(cid,early=True)
+            try:self._settle(cid,early=True)
+            except CourseDeleted:raise
+            except Exception as error:print('Early settling skipped: %s'%error,flush=True)   # never blocks the lectures
             with self.manifest_lock:
                 rows=[json.loads(x) for x in (cd/'chunks.jsonl').read_text(encoding='utf-8').splitlines() if x]
                 manifest=self.manifest(cid);units=manifest['units']
@@ -2456,7 +2458,7 @@ class CourseManager(object):
         with self.cache_lock:self.cache[course_id]=data
         return data
 
-    def overview_context(self,course_id,man=None):
+    def overview_context(self,course_id,man=None,budget=4500):
         """What the whole course covers: its name and every chapter in order, each with a line of its own text."""
         man=man or self.manifest(course_id)
         if not man:return ''
@@ -2471,19 +2473,36 @@ class CourseManager(object):
             if unit.get('source_blocked'):continue
             gist=_unit_gist(unit,grouped.get(unit['id'],[]))
             row='%s. %s%s'%(index,unit.get('title') or 'Chapter %s'%index,(' — '+gist) if gist else '')
-            if used+len(row)>CONTEXT_BUDGET:break
+            if used+len(row)>min(budget,CONTEXT_BUDGET):break
             parts.append(row);used+=len(row)+1
         return '\n'.join(parts) if len(parts)>2 else ''
 
     def search(self,course_id,question):
+        """Passages for a question; a question about the whole course also gets the chapter list in front
+        (the model's input is small, so the passages are trimmed to fit, whole passages only)."""
+        if not _is_overview_question(question):return self._search_passages(course_id,question)
+        try:found=self._search_passages(course_id,question)
+        except Exception:found={}   # the search index is not available: the chapter list still answers
+        man=found.get('course') or self.manifest(course_id)
+        if not man:return found or self._search_passages(course_id,question)
+        has_passages=bool(found.get('in_scope') and found.get('context'))
+        overview=self.overview_context(course_id,man,budget=2600 if has_passages else 4500)
+        if not overview:return found or self._search_passages(course_id,question)
+        context=overview
+        if has_passages:
+            kept=[];used=len(overview)+2
+            for block in re.split(r'\n\n(?=\[Evidence \d+ \|)',str(found['context'])):
+                if used+len(block)+2>CONTEXT_BUDGET:break
+                kept.append(block);used+=len(block)+2
+            context=overview+''.join('\n\n'+block for block in kept)
+        return dict(found,ok=True,in_scope=True,reason='course-overview',context=context,course=man,top_similarity=max(1.0,float(found.get('top_similarity') or 0)),
+            sources=found.get('sources') or [],retrieval=dict(found.get('retrieval') or {},overview=True))
+
+    def _search_passages(self,course_id,question):
         man=self.manifest(course_id)
         if not man:return {'ok':False,'reason':'course-not-found','context':'','sources':[],'retrieval':{},'in_scope':False}
         q=str(question or '').strip()
         if not q:return {'ok':False,'reason':'empty-question','context':'','sources':[],'retrieval':{},'in_scope':False,'course':man}
-        if _is_overview_question(q):
-            overview=self.overview_context(course_id,man)
-            if overview:
-                return {'ok':True,'in_scope':True,'reason':'course-overview','context':overview,'sources':[],'retrieval':{'overview':True},'course':man,'top_similarity':1.0}
         data=self._load_index(course_id);terms=_search_terms(q)
         try:qv=_embed_resilient([q])[0] if data['semantic'] else None
         except Exception:qv=None

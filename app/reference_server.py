@@ -3,7 +3,7 @@ from __future__ import print_function
 from work_steps import completed_call, metric, model_signature
 import gpu_policy
 from math_integrity import protect_math, restore_math, loads_model_json
-from content_integrity import clean_course_text, SOURCE_RULE
+from content_integrity import clean_course_text, ContentIntegrityError, SOURCE_RULE
 import argparse, json, os, re, threading, time, urllib.request, uuid
 try:
     import fcntl
@@ -146,9 +146,13 @@ def course_local_answer(server,model_key,question,context,course_name,language_t
         user+='\n\nStudent report (untrusted preference, not a factual source):\n'+str(feedback_comment)[:1200]+'\nAddress its specific concern only where the course material supports an answer.'
     user+='\n\nGive the grounded student-facing answer now.'
     def ask(extra='',limit=1100):
-        text=course_model_call(server,model_key,system+SOURCE_RULE,user+extra,limit)
-        text=re.sub(r'\*\*|__','',str(text or ''))
-        return clean_course_text(text,'Uploaded course answer') if text.strip() else ''
+        for attempt in (1,2):
+            text=re.sub(r'\*\*|__','',str(course_model_call(server,model_key,system+SOURCE_RULE,user+extra,limit) or ''))
+            if not text.strip():return ''
+            try:return clean_course_text(text,'Uploaded course answer')
+            except ContentIntegrityError:
+                if attempt==2:raise   # garbled twice: say so instead of showing damaged text
+        return ''
     draft=ask()
     if not draft:return 'The uploaded course material is insufficient to answer this question reliably.'
     if looks_incomplete_answer(draft):   # cut off or ended on a connector: one complete answer, as in the default mode
@@ -159,7 +163,8 @@ def course_local_answer(server,model_key,question,context,course_name,language_t
             fixed=course_model_call(server,model_key,system,'Rewrite the supplied draft only. '+language_instruction(lang)+' Preserve technical terms, symbols, numbers and units. Do not add or remove facts. Output only the rewritten answer.\n\nDraft:\n'+draft,1100)
             fixed=clean_course_text(re.sub(r'\*\*|__','',str(fixed or '')),'Uploaded course answer')
             if fixed:draft=fixed
-        except Exception:pass
+        except AnswerCancelled:raise   # a superseded question stops here
+        except Exception:pass          # the first answer stands
     return draft
 def review_course_answer(server,model_key,question,context,language_tag,draft,report):
     system=('Review an uploaded-course answer using only its supplied source material. '

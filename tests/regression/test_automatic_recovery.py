@@ -457,7 +457,15 @@ with tempfile.TemporaryDirectory() as temporary:
     overview=manager.overview_context('course')
     assert overview.startswith('Course:') and 'Chapters in order:' in overview,overview
     found=manager.search('course','這整本在講什麼')
-    assert found['in_scope'] and found['ok'] and found['context']==manager.overview_context('course') and found['reason']=='course-overview'
+    assert found['in_scope'] and found['ok'] and found['context'].startswith('Course:') and 'Chapters in order:' in found['context'] and found['reason']=='course-overview',found
+    assert found['retrieval'].get('overview') is True
+    # Passages are kept whole and the total stays inside the model's input budget; a chapter question is still searched.
+    with patch.object(cr.CourseManager,'_search_passages',lambda self,cid,q:{'ok':True,'in_scope':True,'context':'\n\n'.join('[Evidence %d | a | u | PDF page 1]\n%s'%(i,'x'*1500) for i in range(1,7)),'sources':[{'chunk_id':'c'}],'retrieval':{'selected_count':6},'course':manager.manifest('course'),'top_similarity':0.5}):
+        combined=manager.search('course','這本書第三章的重點是什麼')
+    assert combined['context'].startswith('Course:') and '[Evidence 1 |' in combined['context'] and len(combined['context'])<=cr.CONTEXT_BUDGET
+    assert combined['context'].count('[Evidence ')<6 and combined['sources']==[{'chunk_id':'c'}]
+    with patch.object(cr.CourseManager,'_search_passages',lambda self,cid,q:(_ for _ in ()).throw(RuntimeError('embedding service down'))):
+        assert manager.search('course','這整本在講什麼')['in_scope']
 
     # -- OCR: 4 at once while quiet, 2 while students ask -------------------
     with patch.object(cpu_budget,'available_cpus',lambda:8),patch.dict(os.environ,{'VQ_CPU_WORKERS':'4','VQ_CPU_WORKERS_BUSY':'2','VQ_CPU_BUSY_WINDOW_SEC':'5'}):
