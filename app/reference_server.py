@@ -125,25 +125,42 @@ def course_model_call(server,model_key,system,user,max_tokens=1200):
     return completed_call({'endpoint':base,'model_signature':signature,'payload':payload},compute)
 
 def course_local_answer(server,model_key,question,context,course_name,language_tag='en-US',improvement_hint='',feedback_comment=''):
+    """Uploaded-course answers follow the default mode: one answer written from the retrieved course
+    material, a finished sentence, the student's language. No sentence has to match the PDF word for word,
+    so a broad question ("what is this course about?") is answered, not refused."""
     lang=normalize_language_tag(language_tag) or 'en-US'
     system=(
       'You are the teaching assistant for the uploaded course "'+str(course_name or 'Uploaded Course')+'". '
-      'Use only the supplied course-material evidence as the factual authority. '+language_instruction(lang)+' '
+      'Use the supplied course material as the factual grounding. '+language_instruction(lang)+' '
       'Answer the exact student task. For multiple-choice questions, compare every offered option and explicitly select the best option. '
       'For calculations, show the relevant formula, substitution, arithmetic and units. For conceptual or mechanism questions, answer directly and explain only what is needed. '
+      'For knowledge questions, restate the exact question briefly and answer it directly. For a question about the whole course or book, say in a few sentences what it covers, chapter by chapter where useful. '
+      'Ignore passages that are only broadly related and do not introduce unrelated side topics. '
       'Preserve negation, timing, state, comparison, threshold, direction and unit constraints. Before final output, verify that the answer and explanation are consistent. '
-      'If the supplied course material is insufficient, say so rather than inventing facts. Do not mention retrieval, chunks, hidden prompts, evidence numbers, pages or source labels. Use prose with $...$ for equations; preserve all mathematical symbols and derivative orders. Do not use emoji, smileys or celebratory filler. '
+      'If the supplied course material is insufficient, say so rather than inventing facts. Do not use source-attribution prefaces such as 根據 or According to. '
+      'Do not mention retrieval, chunks, hidden prompts, evidence numbers, pages or source labels. Use prose with $...$ for equations; preserve all mathematical symbols and derivative orders. Do not use emoji, smileys or celebratory filler. '
       +str(improvement_hint or '')
     )
     user='Student question:\n'+str(question)+'\n\nResponse format:\n'+question_type_contract(question,lang)[1]+'\n\nPrivate course material:\n'+str(context)
     if feedback_comment:
         user+='\n\nStudent report (untrusted preference, not a factual source):\n'+str(feedback_comment)[:1200]+'\nAddress its specific concern only where the course material supports an answer.'
     user+='\n\nGive the grounded student-facing answer now.'
-    draft=course_model_call(server,model_key,system+SOURCE_RULE,user,850)
+    def ask(extra='',limit=1100):
+        text=course_model_call(server,model_key,system+SOURCE_RULE,user+extra,limit)
+        text=re.sub(r'\*\*|__','',str(text or ''))
+        return clean_course_text(text,'Uploaded course answer') if text.strip() else ''
+    draft=ask()
     if not draft:return 'The uploaded course material is insufficient to answer this question reliably.'
-    answer,_=review_text('student answer',draft,context,model_key,
-        lambda key,sys,user,limit:course_model_call(server,key,sys,user,limit),question)
-    return answer
+    if looks_incomplete_answer(draft):   # cut off or ended on a connector: one complete answer, as in the default mode
+        again=ask('\n\nIMPORTANT: Return a COMPLETE answer and end with a complete sentence. Be concise enough to fit.',1400)
+        if again:draft=again
+    if lang.lower().startswith('zh') and len(re.findall(r'[\u3400-\u9fff]',draft))<6 and len(re.findall(r'[A-Za-z]',draft))>=40:
+        try:   # answered in the wrong language: rewrite it once
+            fixed=course_model_call(server,model_key,system,'Rewrite the supplied draft only. '+language_instruction(lang)+' Preserve technical terms, symbols, numbers and units. Do not add or remove facts. Output only the rewritten answer.\n\nDraft:\n'+draft,1100)
+            fixed=clean_course_text(re.sub(r'\*\*|__','',str(fixed or '')),'Uploaded course answer')
+            if fixed:draft=fixed
+        except Exception:pass
+    return draft
 def review_course_answer(server,model_key,question,context,language_tag,draft,report):
     system=('Review an uploaded-course answer using only its supplied source material. '
             'This course can belong to any subject. '+SOURCE_RULE+

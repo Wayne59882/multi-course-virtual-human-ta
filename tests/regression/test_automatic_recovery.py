@@ -445,6 +445,20 @@ with tempfile.TemporaryDirectory() as temporary:
     manager._update_manifest('course',lambda m:(m['units'][0].update(script_status='ready',script=CHINESE,script_kind='written',script_failure='',script_error=''),
         m['preparation']['lectures'].update(status='ready')))
 
+    # A title slide gives no lecture: a teacher's e-mail address and phone number are not teaching material.
+    title_slide=[{'text':'Seminar of Genomic Study\n2025 Spring Semester\nLiang-Chuan Lai\nEmail: llai@ntu.edu.tw\nPh: 23123456 ext. 288241'}]
+    assert cr._source_outline_lecture(title_slide)=='' and '@' not in cr._source_excerpt_lecture({},title_slide)
+    assert cr._source_outline_lecture([{'text':'Transcription\nRNA polymerase\nPromoter\nmRNA\nSplicing'}]).startswith('Slide points')
+    # "What is this whole course about?" is answered from the chapter list, not from one searched passage.
+    for question in ('可以方便跟我講一下就是這一這整本的內容大概是在講什麼','這門課主要在教什麼','What is this whole course about?','Give me an overview of this book'):
+        assert cr._is_overview_question(question),question
+    for question in ('甚麼是machine learning','什麼是轉錄體','What is splicing?','這個基因的功能是什麼'):
+        assert not cr._is_overview_question(question),question
+    overview=manager.overview_context('course')
+    assert overview.startswith('Course:') and 'Chapters in order:' in overview,overview
+    found=manager.search('course','這整本在講什麼')
+    assert found['in_scope'] and found['ok'] and found['context']==manager.overview_context('course') and found['reason']=='course-overview'
+
     # -- OCR: 4 at once while quiet, 2 while students ask -------------------
     with patch.object(cpu_budget,'available_cpus',lambda:8),patch.dict(os.environ,{'VQ_CPU_WORKERS':'4','VQ_CPU_WORKERS_BUSY':'2','VQ_CPU_BUSY_WINDOW_SEC':'5'}):
         quiet=Path(oc.ACTIVITY_PATH)

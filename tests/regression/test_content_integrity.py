@@ -50,6 +50,27 @@ try:
     assert rs.review_course_answer(None,'gemma','Explain',text,'en-US','draft','report')[0]==text
 finally:rs.course_model_call=old
 print('[OK] Generic local Q&A preserves table references, variables, subscripts, unit symbols and programming identifiers')
+# The local answer route follows the default mode: no sentence has to match the PDF word for word, a cut-off
+# answer is asked again once, and an answer in the wrong language is rewritten once.
+calls=[]
+def scripted(replies):
+    def call(srv,key,system,user,tokens):
+        calls.append((system,user));return replies.pop(0)
+    return call
+try:
+    rs.course_model_call=scripted(['這門課從轉錄體開始，說明基因如何被讀出並調控，之後談到基因體定序與分析方法。'])
+    answer=rs.course_local_answer(None,'gemma','這整本在講什麼','Course: Genomics\nChapters in order:\n1. Transcriptome','Genomics','zh-TW')
+    assert answer.startswith('這門課從轉錄體開始') and len(calls)==1,'one draft, no word-for-word source review'
+    assert 'COURSE_GROUNDING_REVIEW' not in calls[0][0]
+    calls.clear()
+    rs.course_model_call=scripted(['The course covers genes and, therefore,','The course covers how genes are read out and regulated.'])
+    assert rs.course_local_answer(None,'gemma','What is this course about?','material','Genomics','en-US')=='The course covers how genes are read out and regulated.' and len(calls)==2
+    calls.clear()
+    rs.course_model_call=scripted(['This course explains how genes are transcribed and regulated across the genome in several chapters.','這門課說明基因如何被轉錄與調控。'])
+    assert rs.course_local_answer(None,'gemma','這整本在講什麼','material','Genomics','zh-TW')=='這門課說明基因如何被轉錄與調控。'
+finally:rs.course_model_call=old
+print('[OK] Uploaded-course local answers use the default flow: one draft, finished sentence, right language, no source-quote gate')
+
 
 # Long Chinese paragraphs have no spaces: bounds must still hold and no text
 # may disappear at the last chunk.

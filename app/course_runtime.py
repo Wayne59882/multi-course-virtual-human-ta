@@ -858,7 +858,7 @@ def _source_excerpt_lecture(unit,chunks,limit=12):
             for sentence in _SENTENCE_END.split(text):
                 sentence=re.sub(r'\s+',' ',sentence).strip()
                 key=sentence.lower()
-                if 40<=len(sentence)<=320 and _sentence_like(sentence) and not text_issues(sentence) and key not in seen:
+                if 40<=len(sentence)<=320 and _sentence_like(sentence) and not text_issues(sentence) and not _CONTACT.search(sentence) and key not in seen:
                     seen.add(key);candidates.append(sentence)
         if len(candidates)>=3:
             step=max(1.0,len(candidates)/float(limit))
@@ -870,6 +870,9 @@ def _source_excerpt_lecture(unit,chunks,limit=12):
     return heading+'\n\n'+'\n\n'.join(picked)
 
 
+# A teacher's e-mail address or phone number on a title slide is not teaching material.
+_CONTACT=re.compile(r'@|\bext\.?\s*\d|\b(?:ph|tel|fax|mobile|e-?mail)\b\s*[:：]|電話|信箱|分機|手機|聯絡',re.I)
+
 def _source_outline_lecture(chunks,limit=40):
     """Slides read by OCR give titles and bullet fragments, not sentences. The
     chapter's own slide points, each once and unchanged, still make a usable
@@ -880,7 +883,7 @@ def _source_outline_lecture(chunks,limit=40):
         for raw in str(chunk.get('text') or '').splitlines():
             line=re.sub(r'\s+',' ',raw).strip(' \t-\u2022\u00b7*')
             key=line.lower()
-            if len(line)<4 or len(line)>200 or key in seen or text_issues(line):continue
+            if len(line)<4 or len(line)>200 or key in seen or text_issues(line) or _CONTACT.search(line):continue
             if re.fullmatch(r'[\d\W_]+',line) or sum(c.isalpha() for c in line)<3:continue
             seen.add(key);lines.append(line)
     if len(lines)<4 or sum(len(x) for x in lines)<40:return ''
@@ -889,6 +892,32 @@ def _source_outline_lecture(chunks,limit=40):
     chinese=sum(len(re.findall(r'[\u3400-\u9fff]',x)) for x in lines)*2>=sum(len(x) for x in lines)
     heading='本章投影片重點（摘自教材原文）' if chinese else 'Slide points from the course material'
     return heading+'\n\n'+'\n'.join('- '+x for x in lines)
+
+_OVERVIEW_ZH_WHOLE=re.compile(r'整本|整門|整个|整個|整堂|這本|这本|這門|这门|這份|这份|這堂|这堂|這個課程|这个课程|這個教材|这个教材|這套|本課程|本教材|本書|這學期|這個課')
+_OVERVIEW_ZH_ASK=re.compile(r'講什麼|講甚麼|講些什麼|說什麼|在講|內容|大概|主要|介紹|概述|概要|重點|大綱|章節|目錄|主題|有哪些|學什麼|學甚麼|教什麼|教甚麼')
+_OVERVIEW_EN_WHOLE=re.compile(r'\b(?:this|the\s+whole|the\s+entire|whole|entire)\s+(?:course|book|textbook|material|materials|slides|deck|class|syllabus)\b',re.I)
+_OVERVIEW_EN_ASK=re.compile(r'\b(?:about|overview|summar\w*|covers?|outline|topics|chapters|contents?|syllabus|learn)\b',re.I)
+
+def _is_overview_question(question):
+    """"What is this whole course/book about?" names no single passage, so passage search cannot answer it."""
+    q=str(question or '')
+    return bool((_OVERVIEW_ZH_WHOLE.search(q) and _OVERVIEW_ZH_ASK.search(q)) or (_OVERVIEW_EN_WHOLE.search(q) and _OVERVIEW_EN_ASK.search(q)))
+
+def _unit_gist(unit,chunks,limit=220):
+    """One or two lines on what a chapter says: its written lecture, else its own sentences, else nothing."""
+    script=str(unit.get('script') or '').strip()
+    if script and unit.get('script_kind') in ('written','context') and not text_issues(script):
+        return re.sub(r'\s+',' ',script)[:limit]
+    picked=[];used=0
+    for chunk in chunks:
+        text=str(chunk.get('text') or '').strip()
+        if _passage_quality(text)<0.25:continue
+        for sentence in _SENTENCE_END.split(text):
+            sentence=re.sub(r'\s+',' ',sentence).strip()
+            if 40<=len(sentence)<=240 and _sentence_like(sentence) and not text_issues(sentence) and not _CONTACT.search(sentence):
+                picked.append(sentence);used+=len(sentence)
+                if len(picked)>=2 or used>=limit:return ' '.join(picked)[:limit+60]
+    return ' '.join(picked)
 
 def _lecture_retryable(error):
     return isinstance(error,(RejectedLecture,GroundingError)) or 'did not finish' in str(error)
@@ -1830,7 +1859,7 @@ class CourseManager(object):
                 if unit.get('script_status')=='ready' and unit.get('script') and unit.get('script_review_revision')==REVIEW_REVISION:
                     # Key sentences stand in for a lecture until new material (for example
                     # figure readings) arrives; then a written lecture is tried again.
-                    return not (unit.get('script_kind')=='source_excerpts' and unit.get('script_evidence')!=fingerprint(unit))
+                    return not (unit.get('script_kind')=='source_excerpts' and (unit.get('script_evidence')!=fingerprint(unit) or _CONTACT.search(unit.get('script') or '')))
                 return unit.get('script_status')=='skipped' and unit.get('script_evidence')==fingerprint(unit)   # settled: nothing new to read since
 
             def wanted(unit):
@@ -1881,7 +1910,7 @@ class CourseManager(object):
                         return
                 content_failure=isinstance(last,MissingLectureSource) or _lecture_retryable(last)
                 attempts=int(unit.get('script_attempts') or 0)+(1 if content_failure else 0)
-                if unit.get('script_kind')=='source_excerpts' and not content_failure:
+                if unit.get('script_kind')=='source_excerpts' and not content_failure and not _CONTACT.search(unit.get('script') or ''):
                     with guard:state['completed']+=1
                     return   # model unavailable: the key sentences stay until the next try
                 if content_failure and (unit.get('script_kind')=='source_excerpts' or (final and attempts>=2)):
@@ -2427,11 +2456,34 @@ class CourseManager(object):
         with self.cache_lock:self.cache[course_id]=data
         return data
 
+    def overview_context(self,course_id,man=None):
+        """What the whole course covers: its name and every chapter in order, each with a line of its own text."""
+        man=man or self.manifest(course_id)
+        if not man:return ''
+        grouped={}
+        path=self._course_dir(course_id)/'chunks.jsonl'
+        if path.exists():
+            for line in path.read_text(encoding='utf-8').splitlines():
+                if line:
+                    row=json.loads(line);grouped.setdefault(row.get('unit_id'),[]).append(row)
+        parts=['Course: %s'%(man.get('course_name') or 'Uploaded Course'),'Chapters in order:'];used=sum(len(x) for x in parts)
+        for index,unit in enumerate(man.get('units') or [],1):
+            if unit.get('source_blocked'):continue
+            gist=_unit_gist(unit,grouped.get(unit['id'],[]))
+            row='%s. %s%s'%(index,unit.get('title') or 'Chapter %s'%index,(' — '+gist) if gist else '')
+            if used+len(row)>CONTEXT_BUDGET:break
+            parts.append(row);used+=len(row)+1
+        return '\n'.join(parts) if len(parts)>2 else ''
+
     def search(self,course_id,question):
         man=self.manifest(course_id)
         if not man:return {'ok':False,'reason':'course-not-found','context':'','sources':[],'retrieval':{},'in_scope':False}
         q=str(question or '').strip()
         if not q:return {'ok':False,'reason':'empty-question','context':'','sources':[],'retrieval':{},'in_scope':False,'course':man}
+        if _is_overview_question(q):
+            overview=self.overview_context(course_id,man)
+            if overview:
+                return {'ok':True,'in_scope':True,'reason':'course-overview','context':overview,'sources':[],'retrieval':{'overview':True},'course':man,'top_similarity':1.0}
         data=self._load_index(course_id);terms=_search_terms(q)
         try:qv=_embed_resilient([q])[0] if data['semantic'] else None
         except Exception:qv=None
