@@ -147,7 +147,11 @@ with tempfile.TemporaryDirectory() as temporary:
     assert cr._passage_quality(fragments)<0.25<=cr._passage_quality(sentences)
     rows=[{'text':fragments}]*6+[{'text':sentences+' '+sentences}]*3
     assert 'Heatmap' not in cr._lecture_evidence({},rows,6200,0.45) and 'Heatmap' in cr._lecture_evidence({},rows,6200,0.0)
-    assert cr._source_excerpt_lecture({},[{'text':fragments}])=='','fragments alone never become a lecture'
+    # Slide fragments still give the chapter its own slide points (unchanged, nothing added).
+    outline=cr._source_excerpt_lecture({},[{'text':fragments},{'text':fragments}])
+    assert outline.startswith('Slide points from the course material') and 'Heatmap' in outline and 'Fold change' in outline
+    assert outline.count('Heatmap')==1 and 'p < 0.05' not in outline,'each point once; numbers alone are dropped'
+    assert cr._source_excerpt_lecture({},[{'text':'1\n2\n--\n3'}])=='','nothing readable: nothing to show'
 
     # -- one chapter's questions do not stop the others ----------------------
     def build(unit,chunks,sentences,existing,key,call,save,target,max_new_facts=None):
@@ -261,7 +265,7 @@ with tempfile.TemporaryDirectory() as temporary:
     manager._wait_for_lectures=lambda cid:None
     manager._index_missing_chunks=lambda cid:0
     manager._drop_indexed_chunks=lambda cid,ids=None:None
-    new_material=[];manager._after_new_material=lambda cid,key,call:new_material.append(cid)
+    new_material=[];manager._after_new_material=lambda cid,key,call,units=None:new_material.append(cid)
     with patch.object(cr,'LocalVision',StandInVision):
         manager._prepare_figures('course','gemma',model_call)
         figures=manager.manifest('course')['preparation']['figures']
@@ -306,6 +310,83 @@ with tempfile.TemporaryDirectory() as temporary:
             try:oc.retry_transient(lambda:(_ for _ in ()).throw(TimeoutError('step limit')));raise AssertionError
             except TimeoutError:pass
 
+    # -- slide chapters: read first, written again when read, never stuck ---
+    folder_course=manager._course_dir('course')
+    source_name=manager.manifest('course')['sources'][0]['file_name']
+    manager._update_manifest('course',lambda m:(m.update(figure_pages=[{'unit_id':'unit%d'%n,'source_file':source_name,'page':n} for n in (1,2,3)]),
+        m['units'][0].update(question_count=5,script_status='ready',script_kind='written',script_review_revision=cr.REVIEW_REVISION),
+        m['units'][1].update(question_count=5,script_status='ready',script_kind='written',script_review_revision=cr.REVIEW_REVISION),
+        m['units'][2].update(question_count=0,script_status='error',script='',script_error='rejected',script_failure='content',script_kind=None)))
+    assert cr._waiting_units(manager.manifest('course'))=={'unit3'}
+    figure_cache=folder_course/'figure_cache.json'
+    if figure_cache.exists():figure_cache.unlink()
+    class SlideVision(object):
+        fingerprint='slides-1';error=''
+        def probe(self):return True
+        def read(self,page):
+            reads.append(page.number+1)
+            return {'ok':True,'text':'Slide %d: transcription is the process in which RNA polymerase copies a gene into messenger RNA, and the transcript is processed afterwards.'%(page.number+1)}
+    events=[];reads.clear()
+    manager._after_new_material=lambda cid,key,call,units=None:events.append((tuple(sorted(units)) if units else None,list(reads)))
+    with patch.object(cr,'LocalVision',SlideVision):
+        manager._prepare_figures('course','gemma',model_call)
+    assert reads==[3,1,2],'the chapter without a lecture is read first: %s'%reads
+    assert events[0]==(('unit3',),[3]),'it is written again as soon as its own pages are read: %s'%events
+    assert events[-1]==(None,[3,1,2])
+    assert manager.manifest('course')['preparation']['figures']['focus_units']==0
+    del manager._after_new_material
+
+    # Only the chapters whose pages were read are tried again.
+    started=[]
+    manager._start_preparation=lambda cid,key,call,force=False,only=None:started.append((force,only))
+    manager._update_manifest('course',lambda m:(m['preparation'].update(lectures={'status':'partial','auto_retries':3},questions={'status':'partial','auto_retries':3}),
+        m['units'][2].update(script_attempts=2),m['units'][1].update(script_status='error',script_attempts=2,script_kind=None)))
+    manager._after_new_material('course','gemma',model_call,units={'unit3'})
+    current=manager.manifest('course')
+    assert current['units'][2]['script_attempts']==0 and current['units'][1]['script_attempts']==2,'other chapters keep their count'
+    assert (True,('lectures',)) in started and (True,('questions',)) in started
+    del manager._start_preparation
+    manager._update_manifest('course',lambda m:m['units'][1].update(script_status='ready',script_kind='written',script_attempts=0))
+
+    # A chapter that is still without lecture or questions after every retry and all its pages
+    # were read is settled: counted out, and the course is complete.
+    manager._update_manifest('course',lambda m:(m['units'][2].update(script_status='error',script_failure='content',script_error='rejected',script_attempts=2,question_count=0),
+        m['preparation'].update(figures={'status':'waiting','auto_retries':0},lectures={'status':'partial','auto_retries':3,'completed_units':2,'total_units':3},
+                                 questions={'status':'partial','auto_retries':3,'ready_units':2})))
+    assert not manager._settle('course'),'not while figure reading may still add material'
+    manager._update_manifest('course',lambda m:m['preparation'].update(figures={'status':'ready'}))
+    manager._update_manifest('course',lambda m:m['preparation']['questions'].update(auto_retries=1))
+    assert manager._settle('course')
+    current=manager.manifest('course')
+    assert current['preparation']['lectures']['status']=='ready' and current['preparation']['lectures']['total_units']==2
+    assert current['units'][2]['script_status']=='skipped'
+    assert current['preparation']['questions']['status']=='partial','questions keep their automatic retries until they are used up'
+    manager._update_manifest('course',lambda m:m['preparation']['questions'].update(auto_retries=3))
+    assert manager._settle('course')
+    current=manager.manifest('course')
+    assert current['preparation']['questions']['status']=='ready' and current['preparation']['questions']['ready_units']==2
+    assert current['units'][2]['question_skipped'] is True and cr._waiting_units(current)==set()
+    # New material for a settled chapter writes it again; a settled chapter is not retried without any.
+    started=[];manager._start_preparation=lambda cid,key,call,force=False,only=None:started.append(only)
+    manager._after_new_material('course','gemma',model_call,units={'unit3'})
+    assert ('lectures',) in started and ('questions',) in started
+    assert 'question_skipped' not in manager.manifest('course')['units'][2]
+    del manager._start_preparation
+
+    # A slide chapter whose lecture the model keeps rejecting still ends with its own slide points.
+    manager._update_manifest('course',lambda m:m['units'][2].update(script_status='error',script='',script_failure='content',script_attempts=1,script_evidence=None,script_kind=None))
+    rows=[json.loads(x) for x in (folder_course/'chunks.jsonl').read_text(encoding='utf-8').splitlines() if x]
+    for row in rows:
+        if row['unit_id']=='unit3':row['text']='Transcription\nRNA polymerase\nPromoter\nmRNA\nSplicing\nIntrons and exons\nEnhancers'
+    (folder_course/'chunks.jsonl').write_text(''.join(json.dumps(row,ensure_ascii=False)+'\n' for row in rows),encoding='utf-8')
+    manager._update_manifest('course',lambda m:m.update(ingestion_complete=True))
+    with patch.object(cr,'review_text',lambda kind,script,*a,**k:(script,{})):
+        manager._prepare_lectures('course','gemma',model_call)
+    unit=manager.manifest('course')['units'][2]
+    assert unit['script_status']=='ready' and unit['script_kind']=='source_excerpts',unit
+    assert unit['script'].startswith('Slide points from the course material') and 'RNA polymerase' in unit['script']
+    assert manager.manifest('course')['preparation']['lectures']['status']=='ready'
+
     # -- OCR: 4 at once while quiet, 2 while students ask -------------------
     with patch.object(cpu_budget,'available_cpus',lambda:8),patch.dict(os.environ,{'VQ_CPU_WORKERS':'4','VQ_CPU_WORKERS_BUSY':'2','VQ_CPU_BUSY_WINDOW_SEC':'5'}):
         quiet=Path(oc.ACTIVITY_PATH)
@@ -314,4 +395,4 @@ with tempfile.TemporaryDirectory() as temporary:
         oc.note_student_activity()
         assert cpu_budget.cpu_workers()==2
         with patch.dict(os.environ,{'VQ_CPU_BUSY_WINDOW_SEC':'0'}):assert cpu_budget.cpu_workers()==4
-print('PASS automatic recovery: one chapter never stops the others (partial), rejected lectures are asked differently with cleaner material and finally become the chapter key sentences, chapters prepare in parallel, failed chapters wait for the final pass, figures try crop/page/halves and never block, only pages with no text are re-read (once, not blank pages), Retry restarts only stopped steps, stopped steps restart by themselves (3 times, growing pauses), a restarting model server only pauses preparation, OCR 4 quiet / 2 busy')
+print('PASS automatic recovery: slide chapters are read first, written again when read, finally settled (never stuck) and keep their own slide points as a lecture; one chapter never stops the others (partial), rejected lectures are asked differently with cleaner material and finally become the chapter key sentences, chapters prepare in parallel, failed chapters wait for the final pass, figures try crop/page/halves and never block, only pages with no text are re-read (once, not blank pages), Retry restarts only stopped steps, stopped steps restart by themselves (3 times, growing pauses), a restarting model server only pauses preparation, OCR 4 quiet / 2 busy')

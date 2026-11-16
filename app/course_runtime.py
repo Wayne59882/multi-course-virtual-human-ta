@@ -773,6 +773,20 @@ def _lecture_evidence(unit,chunks,max_chars=6200,min_quality=0.0):
     return '\n\n'.join(picked)
 
 
+def _waiting_units(manifest):
+    """Chapters that still lack a written lecture or practice questions. Their
+    pages are read first by the figure step and they are written again as soon
+    as their pages have been read."""
+    waiting=set()
+    for unit in (manifest or {}).get('units') or []:
+        if unit.get('source_blocked'):continue
+        lecture=unit.get('script_status')!='ready' or unit.get('script_kind')=='source_excerpts'
+        if unit.get('script_status')=='skipped':lecture=False
+        questions=int(unit.get('question_count') or 0)<2 and not unit.get('question_skipped')
+        if lecture or questions:waiting.add(unit['id'])
+    return waiting
+
+
 class RejectedLecture(RuntimeError):pass
 class MissingLectureSource(RejectedLecture):pass
 
@@ -829,10 +843,31 @@ def _source_excerpt_lecture(unit,chunks,limit=12):
             step=max(1.0,len(candidates)/float(limit))
             picked=[candidates[int(i*step)] for i in range(min(limit,len(candidates)))]
             break
-    if len(picked)<3:return ''
+    if len(picked)<3:return _source_outline_lecture(chunks)
     chinese=sum(bool(re.search(r'[\u3400-\u9fff]',x)) for x in picked)*2>=len(picked)
     heading='本章重點（摘自教材原文）' if chinese else 'Key points from the course material'
     return heading+'\n\n'+'\n\n'.join(picked)
+
+
+def _source_outline_lecture(chunks,limit=40):
+    """Slides read by OCR give titles and bullet fragments, not sentences. The
+    chapter's own slide points, each once and unchanged, still make a usable
+    lecture page until the pages are read in full (then a written lecture
+    replaces it). Nothing is added to what the slides say."""
+    lines=[];seen=set()
+    for chunk in chunks:
+        for raw in str(chunk.get('text') or '').splitlines():
+            line=re.sub(r'\s+',' ',raw).strip(' \t-\u2022\u00b7*')
+            key=line.lower()
+            if len(line)<4 or len(line)>200 or key in seen or text_issues(line):continue
+            if re.fullmatch(r'[\d\W_]+',line) or sum(c.isalpha() for c in line)<3:continue
+            seen.add(key);lines.append(line)
+    if len(lines)<4 or sum(len(x) for x in lines)<40:return ''
+    if len(lines)>limit:
+        step=len(lines)/float(limit);lines=[lines[int(i*step)] for i in range(limit)]
+    chinese=sum(len(re.findall(r'[\u3400-\u9fff]',x)) for x in lines)*2>=sum(len(x) for x in lines)
+    heading='本章投影片重點（摘自教材原文）' if chinese else 'Slide points from the course material'
+    return heading+'\n\n'+'\n'.join('- '+x for x in lines)
 
 def _lecture_retryable(error):
     return isinstance(error,(RejectedLecture,GroundingError)) or 'did not finish' in str(error)
@@ -1765,6 +1800,9 @@ class CourseManager(object):
                     if unit.get('script_kind')=='source_excerpts' and unit.get('script_evidence')!=fingerprint(unit):return True
                     with guard:state['completed']+=1
                     return False
+                if unit.get('script_status')=='skipped' and unit.get('script_evidence')==fingerprint(unit):
+                    with guard:state['completed']+=1
+                    return False   # settled: nothing new to read since
                 if unit.get('script_status')=='error' and unit.get('script_evidence')==fingerprint(unit) and _content_failure(unit):
                     # Same evidence already failed every variant: try once more on the final pass.
                     if not final:
@@ -1848,6 +1886,7 @@ class CourseManager(object):
             self._update_manifest(cid,lambda m:m['preparation']['lectures'].update({'status':'partial' if left else 'ready',
                 'error':'; '.join(state['errors'])[:1000],'completed_units':done,'total_units':len(units),
                 'message':'Chinese lectures ready: %s / %s'%(done,len(units))+('; %s chapters are tried again automatically'%left if left else '')}))
+            if left:self._settle(cid)
         except CourseDeleted:raise
         except Exception as e:
             self._update_manifest(cid,lambda m:m['preparation']['lectures'].update({'status':'error','error':str(e),'message':'Chinese lecture preparation stopped'}))
@@ -1878,6 +1917,13 @@ class CourseManager(object):
             self._wait_for_lectures(cid);self._alive(cid)
             m=self.manifest(cid) or {};pages=m.get('figure_pages') or []
             if not pages:return
+            # Chapters still without a written lecture or practice questions are read first
+            # (their pages are what is missing); each is written again as soon as its pages are read.
+            focus=_waiting_units(m)&{row['unit_id'] for row in pages}
+            pages=sorted(pages,key=lambda row:0 if row['unit_id'] in focus else 1)
+            unit_pages={}
+            for row in pages:unit_pages.setdefault(row['unit_id'],[]).append(row)
+            signalled=set();fresh_units=set()   # chapters with passages not yet handed to lecture/question writing
             vision=LocalVision()
             if not vision.probe():
                 status(status='unavailable',message='Figures on text pages were not read: '+vision.error);return
@@ -1918,6 +1964,7 @@ class CourseManager(object):
                         with cp.open('a',encoding='utf-8') as f:
                             for c in fresh:f.write(json.dumps(c,ensure_ascii=False)+'\n')
                 if stale:self._drop_indexed_chunks(cid,[c['id'] for c in stale])
+                fresh_units.update({c['unit_id'] for c in fresh}|{c['unit_id'] for c in stale})
                 totals['added']+=len(fresh);totals['replaced']+=len({(c['unit_id'],c.get('pdf_page')) for c in stale})
                 with self.running_lock:indexing=(cid,'index') in self.running
                 if final:
@@ -1929,6 +1976,14 @@ class CourseManager(object):
                     if final:self._drop_indexed_chunks(cid)  # an index built meanwhile may still hold replaced OCR passages
                 else:
                     with self.cache_lock:self.cache.pop(cid,None)  # text search sees new passages at once
+            def unit_read(uid):
+                return all((done.get('%s|%s'%(r['source_file'],r['page'])) or {}).get('ok') or (done.get('%s|%s'%(r['source_file'],r['page'])) or {}).get('exhausted') for r in unit_pages.get(uid,[]))
+            def chapter_read(uid):
+                """All pages of a waiting chapter are read: write its lecture and questions again now."""
+                signalled.add(uid);publish(False)
+                if uid in fresh_units:
+                    fresh_units.discard(uid);self._after_new_material(cid,model_key,model_call,units={uid})
+                status(focus_units=len(focus-signalled))
             shas={src.get('file_name'):src.get('sha256') for src in m.get('sources') or [] if src.get('sha256')}
             def shared(row):
                 sha=shas.get(row['source_file'])
@@ -1952,7 +2007,7 @@ class CourseManager(object):
                         try:done[key]=json.loads(shared(row).read_text(encoding='utf-8'));_json_dump(cache_path,done)  # read before (same PDF, same model)
                         except Exception:pass
                     if key not in done:
-                        status(status='preparing',completed=n-1,total=len(pages),message='Reading figures: page %s (%s / %s)'%(row['page'],n,len(pages)))
+                        status(status='preparing',completed=n-1,total=len(pages),focus_units=len(focus-signalled),message='Reading figures: page %s (%s / %s)'%(row['page'],n,len(pages)))
                         if row['source_file'] not in docs:docs[row['source_file']]=fitz.open(str(cd/'source'/row['source_file']))
                         result=vision.read(docs[row['source_file']][int(row['page'])-1])
                         done[key]={'ok':bool(result.get('ok')),'text':result.get('text','') if result.get('ok') else '','error':result.get('error','')[:240],
@@ -1961,6 +2016,7 @@ class CourseManager(object):
                         if done[key]['ok'] and shared(row) is not None:
                             shared(row).parent.mkdir(parents=True,exist_ok=True);_json_dump(shared(row),done[key])
                         if n%FIGURE_BATCH==0:publish(False)
+                    if row['unit_id'] in focus and row['unit_id'] not in signalled and unit_read(row['unit_id']):chapter_read(row['unit_id'])
             finally:
                 for doc in docs.values():doc.close()
             publish(True)
@@ -1974,27 +2030,74 @@ class CourseManager(object):
                    ocr_pages_replaced=totals['replaced'],
                    message='Figures read on %s / %s pages; %s figure passages added to course Q&A'%(read,len(pages),totals['added'])+
                    ('; reviewed readings replaced interim OCR text on %s pages'%totals['replaced'] if totals['replaced'] else ''))
+            status(focus_units=0)
             if totals['added'] or totals['replaced']:self._after_new_material(cid,model_key,model_call)
+            self._settle(cid)
         except CourseDeleted:raise
-        except Exception as e:status(status='error',error=str(e)[:400],message='Figure reading stopped; text-based course content remains available')
+        except Exception as e:status(status='error',error=str(e)[:400],focus_units=0,message='Figure reading stopped; text-based course content remains available')
 
-    def _after_new_material(self,cid,model_key,model_call):
+    def _after_new_material(self,cid,model_key,model_call,units=None):
         """Figure readings added course material: chapters still without a written
-        lecture or practice questions are tried again with it."""
+        lecture or practice questions are tried again with it. units: only these
+        chapters (their pages have just been read), not the whole course."""
         m=self.manifest(cid) or {};prep=m.get('preparation') or {}
-        excerpts=any(u.get('script_kind')=='source_excerpts' for u in m.get('units') or [])
+        chosen=[u for u in m.get('units') or [] if units is None or u['id'] in units]
+        excerpts=any(u.get('script_kind')=='source_excerpts' or u.get('script_status')=='skipped' for u in chosen)
         lectures=(prep.get('lectures') or {}).get('status') in ('partial','error') or excerpts
-        questions=(prep.get('questions') or {}).get('status') in ('partial','error')
+        questions=(prep.get('questions') or {}).get('status') in ('partial','error') or any(u.get('question_skipped') for u in chosen)
         if not (lectures or questions):return
         def reset(current):
             for kind in ('lectures','questions'):
                 row=(current.get('preparation') or {}).get(kind)
                 if row is not None:row['auto_retries']=0
             for unit in current.get('units') or []:
-                if unit.get('script_status')=='error':unit['script_attempts']=0
+                if units is not None and unit['id'] not in units:continue
+                if unit.get('script_status') in ('error','skipped'):unit['script_attempts']=0
+                unit.pop('question_skipped',None)
         self._update_manifest(cid,reset)
         if lectures:self._start_preparation(cid,model_key,model_call,force=True,only=('lectures',))
-        if questions:self._start_preparation(cid,model_key,model_call,only=('questions',))
+        if questions:self._start_preparation(cid,model_key,model_call,force=True,only=('questions',))
+
+    def _figures_finished(self,m):
+        """No more figure reading will add material: none to read, finished, the
+        model unavailable, or every automatic retry used."""
+        if not m.get('figure_pages'):return True
+        info=(m.get('preparation') or {}).get('figures') or {}
+        return info.get('status') in ('ready','unavailable') or int(info.get('auto_retries') or 0)>=PREPARATION_RETRIES
+
+    def _settle(self,cid):
+        """A chapter that still has no lecture or practice questions after every
+        automatic retry and after its pages were read in full is settled instead
+        of staying "in progress" for ever: it is left out of the counts, and it is
+        written again if new material for it ever arrives (_after_new_material)."""
+        m=self.manifest(cid) or {}
+        if m.get('ingestion_complete') is False or not self._figures_finished(m):return False
+        prep=m.get('preparation') or {}
+        def exhausted(kind):
+            info=prep.get(kind) or {}
+            return info.get('status')=='partial' and int(info.get('auto_retries') or 0)>=PREPARATION_RETRIES
+        lectures=exhausted('lectures');questions=exhausted('questions')
+        if not (lectures or questions):return False
+        def settle(current):
+            usable=[u for u in current.get('units') or [] if not u.get('source_blocked')]
+            if lectures:
+                for unit in usable:
+                    if unit.get('script_status')=='error' and _content_failure(unit):unit['script_status']='skipped'
+                skipped=sum(u.get('script_status')=='skipped' for u in usable)
+                if not any(u.get('script_status')=='error' for u in usable):
+                    ready=sum(u.get('script_status')=='ready' for u in usable)
+                    current['preparation']['lectures'].update({'status':'ready','completed_units':ready,'total_units':ready,
+                        'skipped_units':skipped,'error':'','message':'Chinese lectures ready: %s / %s; %s chapters have too little readable text'%(ready,ready,skipped)})
+            if questions:
+                skipped=0
+                for unit in usable:
+                    if int(unit.get('question_count') or 0)<2:unit['question_skipped']=True;skipped+=1
+                ready=len(usable)-skipped
+                current['preparation']['questions'].update({'status':'ready','completed_units':ready,'total_units':ready,'ready_units':ready,
+                    'skipped_units':skipped,'error':'','message':'%s units have practice questions; %s units have too little readable text'%(ready,skipped)})
+                current['question_generation']=QUESTION_GENERATION
+        self._update_manifest(cid,settle)
+        return True
 
     def _drop_indexed_chunks(self,cid,ids=None):
         """Remove replaced passages from the semantic index (text search reads chunks.jsonl).
@@ -2075,7 +2178,7 @@ class CourseManager(object):
                     position=next((n for n,(_,unit) in enumerate(pending) if unit['id']==priority),0)
                     idx,u=pending.pop(position)
                     unit_id=u['id']
-                    if u.get('source_blocked'):continue
+                    if u.get('source_blocked') or u.get('question_skipped'):continue
                     if len(banks.get(unit_id) or [])>=target:continue
                     def save_progress(cards,available,processed,unit_index=idx,unit_id=unit_id,unit_title=u['title'],phase=phase):
                         self._alive(cid);banks[unit_id]=cards;_json_dump(cd/'question_banks.json',banks)
@@ -2123,18 +2226,20 @@ class CourseManager(object):
                         model_key,timed_model_call,save_expansion,QUESTION_TARGET)
                 self._update_manifest(cid,lambda current,uid=unit_id:current['preparation']['questions'].update({
                     'expansion_requests':[x for x in current['preparation']['questions'].get('expansion_requests',[]) if x!=uid]}))
-            missing=[u for u in m['units'] if not u.get('source_blocked') and len(banks.get(u['id']) or [])<2]
+            counted=[u for u in m['units'] if not u.get('source_blocked') and not u.get('question_skipped')]
+            missing=[u for u in counted if len(banks.get(u['id']) or [])<2]
             if missing:
-                usable=sum(not u.get('source_blocked') for u in m['units']);ready=usable-len(missing)
+                usable=len(counted);ready=usable-len(missing)
                 why='; '.join(failures.get(u['id']) or '%s: fewer than two questions passed review'%u['title'] for u in missing[:4])
                 self._update_manifest(cid,lambda current:(current.update({'status':'ready' if current.get('ingestion_complete',True) else 'preparing'}),
                     current['preparation']['questions'].update({'status':'partial','ready_units':ready,'error':why[:1000],
                         'message':'%s / %s units have practice questions; %s are tried again automatically'%(ready,usable,len(missing))})))
+                self._settle(cid)
                 return
-            usable=sum(not u.get('source_blocked') for u in m['units'])
+            usable=len(counted)
             self._update_manifest(cid,lambda current:(current.update({'status':'ready' if current.get('ingestion_complete',True) else 'preparing','question_generation':QUESTION_GENERATION}),
                 current['preparation']['questions'].update({'status':'ready','completed_units':usable,'total_units':usable,
-                    'ready_units':usable,'source_blocked_units':len(m['units'])-usable,'message':'Quick question banks ready; source-blocked units remain listed for review'})))
+                    'ready_units':usable,'source_blocked_units':sum(bool(u.get('source_blocked')) for u in m['units']),'skipped_units':sum(bool(u.get('question_skipped')) for u in m['units']),'message':'Quick question banks ready; source-blocked units remain listed for review'})))
         except Exception as e:self._update_manifest(cid,lambda m:(m.update({'status':'error'}),m['preparation']['questions'].update({'status':'error','error':str(e),'message':'Question review stopped; saved approved questions remain available'})))
 
     def upload_diagnostics(self,stage_id):
