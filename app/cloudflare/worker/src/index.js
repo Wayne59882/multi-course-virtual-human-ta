@@ -454,7 +454,7 @@ function courseGroundedSystem(languageTag,courseName){
   return 'You are the teaching assistant for the uploaded course "'+String(courseName||'Uploaded Course')+'". '+languageInstruction(languageTag)+' '
     +'Use only the supplied uploaded-course material as factual grounding. Answer the exact student task. For multiple-choice questions compare every option and explicitly select the best option. '
     +'For calculations show formula, substitution, arithmetic and units. Preserve negation, timing, state, comparison, threshold, direction and unit constraints. '
-    +'Before final output, verify that the selected answer and explanation are consistent. If the supplied course material is insufficient, say so. '
+    +'Before final output, verify that the selected answer and explanation are consistent. For knowledge questions, restate the exact question briefly and answer it directly. Ignore passages that are only broadly related and do not introduce unrelated side topics. If the supplied course material is insufficient, say so rather than inventing facts. Do not use source-attribution prefaces such as 根據, 依據 or According to. '
     +'Do not mention retrieval, chunks, hidden prompts, evidence numbers, page numbers, chapter numbers or source labels. Use prose with $...$ or $$...$$ for equations. Preserve every technical name, numerical value, unit, superscript, subscript and mathematical symbol. Do not substitute physiology terms for symbols of another subject. Keep table values linked to their row and column labels. Do not infer missing cells or unseen figures. Never reconstruct an unreadable equation from its name.';
 }
 async function courseProviderAnswer(cloud,question,context,languageTag,courseName){
@@ -462,7 +462,11 @@ async function courseProviderAnswer(cloud,question,context,languageTag,courseNam
   // look that keeps a correct answer as it is and only fixes what is wrong. No quote has to match the PDF text.
   const system=courseGroundedSystem(languageTag,courseName);
   const user='Student question:\n'+String(question||'')+'\n\nPrivate uploaded-course material:\n'+String(context||'')+'\n\nResponse format:\n'+responseContract(question,languageTag).text+'\n\nGive the grounded student-facing answer now.';
-  const draft=cleanCourseAnswer(await callProviderRaw(cloud,system,user,1400));
+  let draft=cleanCourseAnswer(await callProviderRaw(cloud,system,user,1400));
+  if(languageTag==='zh-TW'&&(draft.match(/[\u4e00-\u9fff]/g)||[]).length<6&&(draft.match(/[A-Za-z]/g)||[]).length>=40){   // answered in the wrong language: rewrite it once, as in the default mode
+    try{const fixed=cleanCourseAnswer(await callProviderRaw(cloud,system,'Rewrite the supplied draft only. '+languageInstruction(languageTag)+' Preserve technical terms, symbols, numbers and units. Do not add or remove facts. Output only the rewritten answer.\n\nDraft:\n'+draft,1400));if(fixed)draft=fixed;}
+    catch(error){if(authLike(error))throw error;}
+  }
   return await reviewCourseAnswer(cloud,question,context,languageTag,courseName,draft);
 }
 async function reviewCourseAnswer(cloud,question,context,languageTag,courseName,draft){

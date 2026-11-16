@@ -52,6 +52,18 @@ const mcq='Which is supervised learning?\nA. Clustering\nB. Regression\nC. Dimen
   script=['回答：機器學習是讓電腦從資料中學習，因此',JSON.stringify({verdict:'correct',corrected_answer:'回答：機器學習是讓電腦從資料中學習。'})];
   assert.equal(await ask('甚麼是machine learning'),'回答：機器學習是讓電腦從資料中學習。');
 
+  // A Chinese question answered in English is rewritten once in Chinese (as in the default mode); the prompt carries its style rules.
+  calls.length=0;
+  const chinese='機器學習是讓電腦從資料中自行找出規律的方法，不需要人工逐條撰寫規則，也能隨著資料增加而改善表現。';
+  script=['Machine learning lets computers find patterns in data without hand-written rules and improve as data grows.',chinese];
+  assert.equal(await ask('甚麼是machine learning'),chinese);
+  assert.equal(calls.length,2);
+  assert(/Rewrite the supplied draft only/.test(calls[1].user)&&calls[1].user.includes('Machine learning lets computers'));
+  assert(/根據/.test(calls[0].system)&&/restate the exact question/.test(calls[0].system),'same style rules as the default mode');
+  // A rewrite that fails keeps the first answer.
+  script=['Machine learning lets computers find patterns in data without hand-written rules and improve as data grows.',new Error('timeout')];
+  assert(/^Machine learning lets/.test(await ask('甚麼是machine learning')));
+
   // The route no longer has a quote gate or the physiology sanitizer.
   const route=worker.slice(worker.indexOf('async function courseAnswer('),worker.indexOf('\nasync function proxy('));
   assert(!/course_grounding_rejected|validateCourseReview/.test(worker),'no quote gate');
