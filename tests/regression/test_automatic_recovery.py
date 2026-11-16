@@ -381,11 +381,8 @@ with tempfile.TemporaryDirectory() as temporary:
     # were read is settled: counted out, and the course is complete.
     manager._update_manifest('course',lambda m:(m['units'][2].update(script_status='error',script_failure='content',script_error='rejected',script_attempts=2,question_count=0),
         m['preparation'].update(figures={'status':'waiting','auto_retries':0},lectures={'status':'partial','auto_retries':3,'completed_units':2,'total_units':3},
-                                 questions={'status':'partial','auto_retries':3,'ready_units':2})))
-    assert not manager._settle('course'),'not while figure reading may still add material'
-    manager._update_manifest('course',lambda m:m['preparation'].update(figures={'status':'ready'}))
-    manager._update_manifest('course',lambda m:m['preparation']['questions'].update(auto_retries=1))
-    assert manager._settle('course')
+                                 questions={'status':'partial','auto_retries':1,'ready_units':2})))
+    assert manager._settle('course'),'figure reading is a supplement: settling never waits for it'
     current=manager.manifest('course')
     assert current['preparation']['lectures']['status']=='ready' and current['preparation']['lectures']['total_units']==2
     assert current['units'][2]['script_status']=='skipped'
@@ -441,6 +438,36 @@ with tempfile.TemporaryDirectory() as temporary:
     # New material for the chapter: the model tries again before any key sentences.
     manager._update_manifest('course',lambda m:(m['units'][0].update(script_evidence='older text'),m['preparation']['lectures'].update(auto_retries=3)))
     manager._settle('course',early=True)
+    assert manager.manifest('course')['units'][0]['script_status']=='error'
+    manager._update_manifest('course',lambda m:(m['units'][0].update(script_status='ready',script=CHINESE,script_kind='written',script_failure='',script_error=''),
+        m['preparation']['lectures'].update(status='ready')))
+
+    # Settling does not wait for figure reading, and a restart that left the step 'preparing' does not matter.
+    manager._update_manifest('course',lambda m:(m['units'][0].update(script_status='error',script='',script_failure='transport',script_kind=None,
+        script_evidence=cr._lecture_fingerprint(mine)),m['preparation'].update(figures={'status':'waiting','auto_retries':0},
+        lectures={'status':'preparing','auto_retries':3,'completed_units':2,'total_units':3})))
+    asked.clear()
+    with patch.object(cr,'review_text',lambda kind,script,*a,**k:(script,{})):
+        manager._prepare_lectures('course','gemma',broken_model)
+    assert not asked and manager.manifest('course')['units'][0]['script_kind']=='source_excerpts'
+    # "Retry" was pressed (retries counted from 0): the model gets one more attempt; when it fails again and the
+    # earlier failure was long ago, the chapter ends with its key sentences instead of waiting for ever.
+    def down(key,system,user,limit):
+        asked.append(user);raise TimeoutError('timed out')
+    def back_to_error(failed_at):
+        manager._update_manifest('course',lambda m:(m['units'][0].update(script_status='error',script='',script_failure='transport',script_kind=None,
+            script_evidence=cr._lecture_fingerprint(mine),script_failed_at=failed_at),m['preparation'].update(lectures={'status':'partial','auto_retries':0,'completed_units':2,'total_units':3})))
+    back_to_error(0)
+    asked.clear()
+    with patch.object(cr,'review_text',lambda kind,script,*a,**k:(script,{})):
+        manager._prepare_lectures('course','gemma',down)
+    assert asked,'one more model attempt'
+    stand_in=manager.manifest('course')['units'][0]
+    assert stand_in['script_status']=='ready' and stand_in['script_kind']=='source_excerpts' and stand_in['script'],stand_in
+    # A failure only minutes ago may be a passing hiccup: the chapter stays for the next automatic try.
+    back_to_error(cr.time.time()-60)
+    with patch.object(cr,'review_text',lambda kind,script,*a,**k:(script,{})):
+        manager._prepare_lectures('course','gemma',down)
     assert manager.manifest('course')['units'][0]['script_status']=='error'
     manager._update_manifest('course',lambda m:(m['units'][0].update(script_status='ready',script=CHINESE,script_kind='written',script_failure='',script_error=''),
         m['preparation']['lectures'].update(status='ready')))

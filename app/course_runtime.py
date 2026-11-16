@@ -831,6 +831,7 @@ def _needs_reread(unit,quality):
 LECTURE_MAX_TOKENS=int(os.environ.get('VQ_LECTURE_MAX_TOKENS','2000'))
 PREPARATION_RETRY_SECONDS=max(30,int(os.environ.get('VQ_PREPARATION_RETRY_SEC','600')))
 PREPARATION_RETRIES=int(os.environ.get('VQ_PREPARATION_RETRIES','3'))
+LECTURE_TRANSPORT_GAP_SEC=max(60,int(os.environ.get('VQ_LECTURE_TRANSPORT_GAP_SEC','1200')))   # two model failures this far apart: stop asking the model
 # When a draft is rejected, the next attempt changes how it is asked rather
 # than repeating the same request: a shorter evenly spaced excerpt and a
 # tighter five-paragraph structure (still within the five-to-seven paragraphs).
@@ -1915,6 +1916,19 @@ class CourseManager(object):
                 if unit.get('script_kind')=='source_excerpts' and not content_failure and not _CONTACT.search(unit.get('script') or ''):
                     with guard:state['completed']+=1
                     return   # model unavailable: the key sentences stay until the next try
+                if not content_failure and unit.get('script_status')=='error' and unit.get('script_failure')=='transport' \
+                        and unit.get('script_evidence')==evidence and time.time()-float(unit.get('script_failed_at') or 0)>=LECTURE_TRANSPORT_GAP_SEC:
+                    # The model could not write this chapter in an earlier pass either, long enough ago: it is
+                    # not a passing hiccup. The chapter's own key sentences stand in (written again when new
+                    # material arrives); nothing in it to say means there is no lecture to give.
+                    stand_in=_source_excerpt_lecture(unit,grouped.get(unit['id'],[]))
+                    with guard:state['completed']+=1
+                    if stand_in:
+                        self._update_manifest(cid,lambda m,n=i,value=stand_in:m['units'][n].update({
+                            'script':value,'script_status':'ready','script_error':'','script_review_revision':REVIEW_REVISION,
+                            'script_kind':'source_excerpts','script_evidence':evidence,'script_failure':''}))
+                    else:self._update_manifest(cid,lambda m,n=i:m['units'][n].update({'script':'','script_status':'skipped','script_evidence':evidence,'script_failure':''}))
+                    return
                 if content_failure and (unit.get('script_kind')=='source_excerpts' or (final and attempts>=2)):
                     # Written twice and rejected twice: the chapter's own key sentences instead.
                     excerpts=_source_excerpt_lecture(unit,grouped.get(unit['id'],[]))
@@ -1927,7 +1941,7 @@ class CourseManager(object):
                 with guard:state['errors'].append('%s: %s'%(unit['title'],last))
                 self._update_manifest(cid,lambda m,n=i,err=str(last),missing=isinstance(last,MissingLectureSource),a=attempts,kind='content' if content_failure else 'transport':m['units'][n].update({
                     'script':'','script_status':'error','script_error':err,'script_needs_source':missing,'script_evidence':evidence,
-                    'script_attempts':a,'script_failure':kind}))
+                    'script_attempts':a,'script_failure':kind,'script_failed_at':time.time()}))
 
             def excerpt(i):
                 unit=units[i];text=_source_excerpt_lecture(unit,grouped.get(unit['id'],[]))
@@ -2116,30 +2130,25 @@ class CourseManager(object):
         if lectures:self._start_preparation(cid,model_key,model_call,force=True,only=('lectures',))
         if questions:self._start_preparation(cid,model_key,model_call,force=True,only=('questions',))
 
-    def _figures_finished(self,m):
-        """No more figure reading will add material: none to read, finished, the
-        model unavailable, or every automatic retry used."""
-        if not m.get('figure_pages'):return True
-        info=(m.get('preparation') or {}).get('figures') or {}
-        return info.get('status') in ('ready','unavailable') or int(info.get('auto_retries') or 0)>=PREPARATION_RETRIES
-
     def _settle(self,cid,early=False):
         """A chapter that still has no lecture or practice questions after every
-        automatic retry and after its pages were read in full is settled instead
-        of staying "in progress" for ever: it is left out of the counts, and it is
-        written again if new material for it ever arrives (_after_new_material).
+        automatic retry is settled instead of staying "in progress" for ever: it is
+        left out of the counts, and it is written again if new material for it ever
+        arrives (_after_new_material), for example from figure reading, which is a
+        supplement and is never waited for.
 
         A lecture the model could not write because of a model or connection problem
         (not because the draft was rejected) is settled with the chapter's own key
         sentences, which need no model, so the course never waits on it for ever.
         early=True does only that, before another model attempt is made."""
         m=self.manifest(cid) or {}
-        if m.get('ingestion_complete') is False or not self._figures_finished(m):return False
+        if m.get('ingestion_complete') is False:return False
         prep=m.get('preparation') or {}
-        def exhausted(kind):
+        def exhausted(kind,states=('partial',)):
             info=prep.get(kind) or {}
-            return info.get('status')=='partial' and int(info.get('auto_retries') or 0)>=PREPARATION_RETRIES
-        lectures=exhausted('lectures');questions=exhausted('questions') and not early
+            return info.get('status') in states and int(info.get('auto_retries') or 0)>=PREPARATION_RETRIES
+        # At the start of a lecture run the step may still say 'preparing' from before a restart.
+        lectures=exhausted('lectures',('partial','preparing','error') if early else ('partial',));questions=exhausted('questions') and not early
         if not (lectures or questions):return False
         stalled={}
         if lectures:
