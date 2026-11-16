@@ -83,9 +83,13 @@ with tempfile.TemporaryDirectory() as temporary:
     units={u['id']:u for u in manager.manifest('course')['units']}
     assert units['unit1']['script_status']=='ready' and units['unit1']['script_variant']==1
     assert units['unit2']['script_status']=='ready' and CHINESE in units['unit2']['script']
-    assert units['unit3']['script_status']=='error' and units['unit3']['script_attempts']==1
+    # A chapter the model cannot write ends with its own key points in the same pass: no waiting, no retries.
+    third=units['unit3']
+    assert third['script_status']=='ready' and third['script_kind']=='source_excerpts',third
+    assert third['script'].startswith('Key points from the course material') and 'Oxygen diffuses from alveolar gas' in third['script']
+    assert 'page' not in third['script'].lower()
     lectures=manager.manifest('course')['preparation']['lectures']
-    assert lectures['status']=='partial' and 'Respiration 3' in lectures['error'],'one chapter does not stop the step'
+    assert lectures['status']=='ready' and lectures['completed_units']==3 and not lectures['error'],lectures
     assert seen['budgets']=={cr.LECTURE_MAX_TOKENS} and cr.LECTURE_MAX_TOKENS==2000
     assert sum(1 for unit,_ in seen['calls'] if unit=='Respiration 3')==len(cr.LECTURE_VARIANTS)
     assert seen['peak']==2,'two chapters should be written at once (peak %s)'%seen['peak']
@@ -95,33 +99,36 @@ with tempfile.TemporaryDirectory() as temporary:
         with patch.object(cr,'review_text',lambda kind,script,*a,**k:(script,{})):
             manager._prepare_lectures('course','gemma',model_call)
         return len(seen['calls'])
-    # While chapters are still arriving, the failed chapter is not retried.
-    manager._update_manifest('course',lambda m:m.update(ingestion_complete=False))
+    assert lecture_calls()==0,'finished chapters are not visited again'
+    chunk_rows=[json.loads(x) for x in (manager._course_dir('course')/'chunks.jsonl').read_text(encoding='utf-8').splitlines() if x]
+    def fingerprint_of(unit_id):return cr._lecture_fingerprint([row for row in chunk_rows if row['unit_id']==unit_id])
+    # While chapters are still arriving, a chapter that failed waits for the final pass (no repeated calls);
+    # the final pass writes its key points without asking the model again.
+    manager._update_manifest('course',lambda m:(m.update(ingestion_complete=False),m['units'][2].update(script='',script_status='error',script_attempts=1,
+        script_failure='content',script_kind=None,script_error='rejected',script_evidence=fingerprint_of('unit3'))))
     assert lecture_calls()==0
-    # Final pass: one more full set of variants, then it stops.
+    assert manager.manifest('course')['units'][2]['script_status']=='error'
     manager._update_manifest('course',lambda m:m.update(ingestion_complete=True))
-    assert lecture_calls()==len(cr.LECTURE_VARIANTS)
+    assert lecture_calls()==0
     third=manager.manifest('course')['units'][2]
-    assert third['script_attempts']==2
-    # Written twice, rejected twice: the chapter's own key sentences (no page numbers, nothing invented).
-    assert third['script_status']=='ready' and third['script_kind']=='source_excerpts',third
-    assert third['script'].startswith('Key points from the course material') and 'Oxygen diffuses from alveolar gas' in third['script']
-    assert 'page' not in third['script'].lower()
+    assert third['script_status']=='ready' and third['script_kind']=='source_excerpts' and third['script'],third
     assert manager.manifest('course')['preparation']['lectures']['status']=='ready'
     assert lecture_calls()==0
 
-    # -- a model/connection problem never counts as a failed attempt --------
+    # -- a chapter that already failed on exactly this text is not asked again ----
     manager._update_manifest('course',lambda m:m['units'][1].update(script='',script_status='error',script_attempts=2,
-        script_error='Ollama stream ended before completion',script_failure=None,script_kind=None))
-    assert lecture_calls()>0,'a chapter stopped by the model server is written again'
-    assert manager.manifest('course')['units'][1]['script_status']=='ready'
-    # A chapter rejected twice before the fallback existed gets its key sentences without another model call.
-    manager._update_manifest('course',lambda m:m['units'][1].update(script='',script_status='error',script_attempts=2,
-        script_error='The local model did not produce a readable Traditional Chinese lecture.',script_failure='content',
-        script_evidence=None))
-    lecture_calls()
+        script_error='Ollama stream ended before completion',script_failure='transport',script_kind=None,script_evidence=fingerprint_of('unit2')))
+    assert lecture_calls()==0,'no model call and no waiting for a chapter that already failed on this text'
     second=manager.manifest('course')['units'][1]
-    assert second['script_status']=='ready',second
+    assert second['script_status']=='ready' and second['script_kind']=='source_excerpts' and second['script'],second
+    # New material for it: the model writes it again.
+    manager._update_manifest('course',lambda m:m['units'][1].update(script='',script_status='error',script_attempts=2,script_failure='content',
+        script_error='rejected',script_evidence=None,script_kind=None))
+    assert lecture_calls()>0
+    assert manager.manifest('course')['units'][1]['script_status']=='ready'
+    # A chapter marked "too little text" before every chapter had a lecture gets one too.
+    manager._update_manifest('course',lambda m:m['units'][1].update(script='',script_status='skipped'))
+    assert lecture_calls()==0 and manager.manifest('course')['units'][1]['script_status']=='ready'
 
     # -- automatic retries continue while they make progress ----------------
     progress_restarts=[]
@@ -345,7 +352,7 @@ with tempfile.TemporaryDirectory() as temporary:
     assert unit['script_status']=='ready' and unit['script_kind']=='context' and unit['script_variant']=='context',unit
     assert len(seen_calls)==1 and '【前後章節教材】' in seen_calls[0] and 'RNA polymerase' in seen_calls[0]
     # Finished lectures count from the start: a slow first chapter never shows the row as 0 / N.
-    manager._update_manifest('course',lambda m:(m['units'][0].update(script_status='error',script='',script_failure='transport',script_error='timeout',script_kind=None),
+    manager._update_manifest('course',lambda m:(m['units'][0].update(script_status='error',script='',script_failure='transport',script_error='timeout',script_kind=None,script_evidence=None),
         m['units'][2].update(script_status='ready',script=CHINESE,script_kind='written',script_review_revision=cr.REVIEW_REVISION,script_evidence='x'),
         m['preparation']['lectures'].update(status='partial',completed_units=0)))
     shown=[]
@@ -377,26 +384,25 @@ with tempfile.TemporaryDirectory() as temporary:
     first=[chunks for uid,chunks in material if uid=='unit1'][0]
     assert all(c['unit_id']=='unit1' for c in first),'chapters with their own sentences use only those'
 
-    # A chapter that is still without lecture or questions after every retry and all its pages
-    # were read is settled: counted out, and the course is complete.
-    manager._update_manifest('course',lambda m:(m['units'][2].update(script_status='error',script_failure='content',script_error='rejected',script_attempts=2,question_count=0),
-        m['preparation'].update(figures={'status':'waiting','auto_retries':0},lectures={'status':'partial','auto_retries':3,'completed_units':2,'total_units':3},
+    # A chapter that is still without practice questions after every automatic retry is counted out, without
+    # waiting for figure reading; its lecture page is never skipped.
+    manager._update_manifest('course',lambda m:(m['units'][2].update(script_status='ready',script=CHINESE,script_kind='written',question_count=0),
+        m['preparation'].update(figures={'status':'waiting','auto_retries':0},lectures={'status':'ready','completed_units':3,'total_units':3},
                                  questions={'status':'partial','auto_retries':1,'ready_units':2})))
-    assert manager._settle('course'),'figure reading is a supplement: settling never waits for it'
-    current=manager.manifest('course')
-    assert current['preparation']['lectures']['status']=='ready' and current['preparation']['lectures']['total_units']==2
-    assert current['units'][2]['script_status']=='skipped'
-    assert current['preparation']['questions']['status']=='partial','questions keep their automatic retries until they are used up'
+    assert not manager._settle('course'),'questions keep their automatic retries until they are used up'
     manager._update_manifest('course',lambda m:m['preparation']['questions'].update(auto_retries=3))
     assert manager._settle('course')
     current=manager.manifest('course')
     assert current['preparation']['questions']['status']=='ready' and current['preparation']['questions']['ready_units']==2
-    assert current['units'][2]['question_skipped'] is True
+    assert current['units'][2]['question_skipped'] is True and current['units'][2]['script_status']=='ready'
     # New material for a settled chapter writes it again; a settled chapter is not retried without any.
     started=[];manager._start_preparation=lambda cid,key,call,force=False,only=None:started.append(only)
     manager._after_new_material('course','gemma',model_call,units={'unit3'})
-    assert ('lectures',) in started and ('questions',) in started
+    assert ('questions',) in started and ('lectures',) not in started,'a written lecture is not written again'
     assert 'question_skipped' not in manager.manifest('course')['units'][2]
+    manager._update_manifest('course',lambda m:m['units'][2].update(script_kind='source_excerpts'))
+    started.clear();manager._after_new_material('course','gemma',model_call,units={'unit3'})
+    assert ('lectures',) in started,'key points are replaced by a written lecture when new material arrives'
     del manager._start_preparation
 
     # A slide chapter whose lecture the model keeps rejecting still ends with its own slide points.
@@ -413,65 +419,15 @@ with tempfile.TemporaryDirectory() as temporary:
     assert unit['script'].startswith('Slide points from the course material') and 'RNA polymerase' in unit['script']
     assert manager.manifest('course')['preparation']['lectures']['status']=='ready'
 
-    # A chapter the model could not write because of a model or connection problem, after every automatic
-    # retry, ends with its own key sentences at once: no further model call, the course is complete.
-    rows=[json.loads(x) for x in (folder_course/'chunks.jsonl').read_text(encoding='utf-8').splitlines() if x]
-    mine=[row for row in rows if row['unit_id']=='unit1']
-    manager._update_manifest('course',lambda m:(m['units'][0].update(script_status='error',script='',script_failure='transport',
-        script_error='stream ended before completion',script_kind=None,script_evidence=cr._lecture_fingerprint(mine)),
-        m['preparation'].update(figures={'status':'ready'},lectures={'status':'partial','auto_retries':3,'completed_units':2,'total_units':3})))
-    asked=[]
-    def broken_model(key,system,user,limit):
-        asked.append(user);raise RuntimeError('stream ended before completion')
-    with patch.object(cr,'review_text',lambda kind,script,*a,**k:(script,{})):
-        manager._prepare_lectures('course','gemma',broken_model)
-    unit=manager.manifest('course')['units'][0]
-    assert not asked,'settled before any new model attempt'
-    assert unit['script_status']=='ready' and unit['script_kind']=='source_excerpts' and unit['script'],unit
-    lectures=manager.manifest('course')['preparation']['lectures']
-    assert lectures['status']=='ready' and lectures['completed_units']==3,lectures
-    # Retries not used up yet: the model gets its turns first.
-    manager._update_manifest('course',lambda m:(m['units'][0].update(script_status='error',script='',script_failure='transport',script_kind=None,
-        script_evidence=cr._lecture_fingerprint(mine)),m['preparation']['lectures'].update(status='partial',auto_retries=1)))
-    assert manager._settle('course',early=True) is False
-    assert manager.manifest('course')['units'][0]['script_status']=='error'
-    # New material for the chapter: the model tries again before any key sentences.
-    manager._update_manifest('course',lambda m:(m['units'][0].update(script_evidence='older text'),m['preparation']['lectures'].update(auto_retries=3)))
-    manager._settle('course',early=True)
-    assert manager.manifest('course')['units'][0]['script_status']=='error'
-    manager._update_manifest('course',lambda m:(m['units'][0].update(script_status='ready',script=CHINESE,script_kind='written',script_failure='',script_error=''),
-        m['preparation']['lectures'].update(status='ready')))
-
-    # Settling does not wait for figure reading, and a restart that left the step 'preparing' does not matter.
-    manager._update_manifest('course',lambda m:(m['units'][0].update(script_status='error',script='',script_failure='transport',script_kind=None,
-        script_evidence=cr._lecture_fingerprint(mine)),m['preparation'].update(figures={'status':'waiting','auto_retries':0},
-        lectures={'status':'preparing','auto_retries':3,'completed_units':2,'total_units':3})))
-    asked.clear()
-    with patch.object(cr,'review_text',lambda kind,script,*a,**k:(script,{})):
-        manager._prepare_lectures('course','gemma',broken_model)
-    assert not asked and manager.manifest('course')['units'][0]['script_kind']=='source_excerpts'
-    # "Retry" was pressed (retries counted from 0): the model gets one more attempt; when it fails again and the
-    # earlier failure was long ago, the chapter ends with its key sentences instead of waiting for ever.
-    def down(key,system,user,limit):
-        asked.append(user);raise TimeoutError('timed out')
-    def back_to_error(failed_at):
-        manager._update_manifest('course',lambda m:(m['units'][0].update(script_status='error',script='',script_failure='transport',script_kind=None,
-            script_evidence=cr._lecture_fingerprint(mine),script_failed_at=failed_at),m['preparation'].update(lectures={'status':'partial','auto_retries':0,'completed_units':2,'total_units':3})))
-    back_to_error(0)
-    asked.clear()
-    with patch.object(cr,'review_text',lambda kind,script,*a,**k:(script,{})):
-        manager._prepare_lectures('course','gemma',down)
-    assert asked,'one more model attempt'
-    stand_in=manager.manifest('course')['units'][0]
-    assert stand_in['script_status']=='ready' and stand_in['script_kind']=='source_excerpts' and stand_in['script'],stand_in
-    # A failure only minutes ago may be a passing hiccup: the chapter stays for the next automatic try.
-    back_to_error(cr.time.time()-60)
-    with patch.object(cr,'review_text',lambda kind,script,*a,**k:(script,{})):
-        manager._prepare_lectures('course','gemma',down)
-    assert manager.manifest('course')['units'][0]['script_status']=='error'
-    manager._update_manifest('course',lambda m:(m['units'][0].update(script_status='ready',script=CHINESE,script_kind='written',script_failure='',script_error=''),
-        m['preparation']['lectures'].update(status='ready')))
-
+    # A chapter whose slides hold only a few words still gets a lecture page: its own points, then the
+    # points of the chapters around it; with nothing readable at all, its title and a note.
+    sparse={'id':'unit9','title':'Transcriptome'}
+    near=[{'text':'Transcription copies a gene\nRNA polymerase binds the promoter\nSplicing removes introns'}]
+    page=cr._key_points_lecture(sparse,[{'text':'Seminar of Genomic Study\n2025 Spring Semester\nLiang-Chuan Lai\nEmail: llai@ntu.edu.tw\nPh: 23123456 ext. 288241'}],near)
+    assert page.startswith('Key points from the course material: Transcriptome') and 'Seminar of Genomic Study' in page and 'RNA polymerase binds the promoter' in page
+    assert '@' not in page and '23123456' not in page
+    assert cr._key_points_lecture(sparse,[{'text':'1\n2'}],[])
+    assert '本章投影片文字很少' in cr._key_points_lecture({'id':'u','title':'轉錄體'},[],[])
     # A title slide gives no lecture: a teacher's e-mail address and phone number are not teaching material.
     title_slide=[{'text':'Seminar of Genomic Study\n2025 Spring Semester\nLiang-Chuan Lai\nEmail: llai@ntu.edu.tw\nPh: 23123456 ext. 288241'}]
     assert cr._source_outline_lecture(title_slide)=='' and '@' not in cr._source_excerpt_lecture({},title_slide)
@@ -502,4 +458,4 @@ with tempfile.TemporaryDirectory() as temporary:
         oc.note_student_activity()
         assert cpu_budget.cpu_workers()==2
         with patch.dict(os.environ,{'VQ_CPU_BUSY_WINDOW_SEC':'0'}):assert cpu_budget.cpu_workers()==4
-print('PASS automatic recovery: image-heavy chapters are written from the text around them (lecture and questions) without forced image reading, finally settled (never stuck) and keep their own slide points as a lecture; one chapter never stops the others (partial), rejected lectures are asked differently with cleaner material and finally become the chapter key sentences, chapters prepare in parallel, failed chapters wait for the final pass, figures try crop/page/halves and never block, only pages with no text are re-read (once, not blank pages), Retry restarts only stopped steps, stopped steps restart by themselves (3 times, growing pauses), a restarting model server only pauses preparation, OCR 4 quiet / 2 busy')
+print('PASS automatic recovery: image-heavy chapters are written from the text around them (lecture and questions) without forced image reading, every chapter always has a lecture page (written by the model, else its key points, else the points of the chapters around it) with no waiting or retries; one chapter never stops the others, rejected lectures are asked differently with cleaner material first, chapters prepare in parallel, a failed chapter waits for the final pass only while chapters are still arriving, figures try crop/page/halves and never block, only pages with no text are re-read (once, not blank pages), Retry restarts only stopped steps, stopped steps restart by themselves (3 times, growing pauses), a restarting model server only pauses preparation, OCR 4 quiet / 2 busy')

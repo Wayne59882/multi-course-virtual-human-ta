@@ -831,7 +831,6 @@ def _needs_reread(unit,quality):
 LECTURE_MAX_TOKENS=int(os.environ.get('VQ_LECTURE_MAX_TOKENS','2000'))
 PREPARATION_RETRY_SECONDS=max(30,int(os.environ.get('VQ_PREPARATION_RETRY_SEC','600')))
 PREPARATION_RETRIES=int(os.environ.get('VQ_PREPARATION_RETRIES','3'))
-LECTURE_TRANSPORT_GAP_SEC=max(60,int(os.environ.get('VQ_LECTURE_TRANSPORT_GAP_SEC','1200')))   # two model failures this far apart: stop asking the model
 # When a draft is rejected, the next attempt changes how it is asked rather
 # than repeating the same request: a shorter evenly spaced excerpt and a
 # tighter five-paragraph structure (still within the five-to-seven paragraphs).
@@ -874,11 +873,8 @@ def _source_excerpt_lecture(unit,chunks,limit=12):
 # A teacher's e-mail address or phone number on a title slide is not teaching material.
 _CONTACT=re.compile(r'@|\bext\.?\s*\d|\b(?:ph|tel|fax|mobile|e-?mail)\b\s*[:：]|電話|信箱|分機|手機|聯絡',re.I)
 
-def _source_outline_lecture(chunks,limit=40):
-    """Slides read by OCR give titles and bullet fragments, not sentences. The
-    chapter's own slide points, each once and unchanged, still make a usable
-    lecture page until the pages are read in full (then a written lecture
-    replaces it). Nothing is added to what the slides say."""
+def _outline_lines(chunks):
+    """The distinct, readable lines of a chapter's slides, in order, unchanged."""
     lines=[];seen=set()
     for chunk in chunks:
         for raw in str(chunk.get('text') or '').splitlines():
@@ -887,12 +883,39 @@ def _source_outline_lecture(chunks,limit=40):
             if len(line)<4 or len(line)>200 or key in seen or text_issues(line) or _CONTACT.search(line):continue
             if re.fullmatch(r'[\d\W_]+',line) or sum(c.isalpha() for c in line)<3:continue
             seen.add(key);lines.append(line)
+    return lines
+
+def _is_chinese(text):
+    text=re.sub(r'\s','',str(text or ''))
+    return bool(text) and len(re.findall(r'[\u3400-\u9fff]',text))*2>=len(text)
+
+def _source_outline_lecture(chunks,limit=40):
+    """Slides read by OCR give titles and bullet fragments, not sentences. The
+    chapter's own slide points, each once and unchanged, still make a usable
+    lecture page until the pages are read in full (then a written lecture
+    replaces it). Nothing is added to what the slides say."""
+    lines=_outline_lines(chunks)
     if len(lines)<4 or sum(len(x) for x in lines)<40:return ''
     if len(lines)>limit:
         step=len(lines)/float(limit);lines=[lines[int(i*step)] for i in range(limit)]
-    chinese=sum(len(re.findall(r'[\u3400-\u9fff]',x)) for x in lines)*2>=sum(len(x) for x in lines)
-    heading='本章投影片重點（摘自教材原文）' if chinese else 'Slide points from the course material'
+    heading='本章投影片重點（摘自教材原文）' if _is_chinese(' '.join(lines)) else 'Slide points from the course material'
     return heading+'\n\n'+'\n'.join('- '+x for x in lines)
+
+def _key_points_lecture(unit,own,near):
+    """Every chapter has a lecture page. When the model has not written one, this is the chapter's key
+    points: its own sentences or slide points, and when its slides hold only a few words, the key points
+    of the chapters around it. Always something; written again when new material arrives."""
+    text=_source_excerpt_lecture(unit,own)
+    if text:return text
+    title=re.sub(r'\s+',' ',str(unit.get('title') or '')).strip()
+    lines=_outline_lines(own);own_keys=set(x.lower() for x in lines)
+    borrowed=[x for x in _outline_lines(near) if x.lower() not in own_keys][:12] if sum(len(x) for x in lines)<120 else []
+    chinese=_is_chinese(' '.join(lines+borrowed+[title]))
+    parts=[('本章重點（摘自教材原文）' if chinese else 'Key points from the course material')+(': '+title if title else '')]
+    if lines:parts.append('\n'.join('- '+x for x in lines))
+    if borrowed:parts.append(('前後章節的相關重點' if chinese else 'From the chapters around it')+'\n'+'\n'.join('- '+x for x in borrowed))
+    if not lines and not borrowed:parts.append('本章投影片文字很少，請對照投影片與前後章節。' if chinese else 'The slides of this chapter hold very little text; see the slides and the chapters around it.')
+    return '\n\n'.join(parts)
 
 _OVERVIEW_ZH_WHOLE=re.compile(r'整本|整門|整个|整個|整堂|這本|这本|這門|这门|這份|这份|這堂|这堂|這個課程|这个课程|這個教材|这个教材|這套|本課程|本教材|本書|這學期|這個課')
 _OVERVIEW_ZH_ASK=re.compile(r'講什麼|講甚麼|講些什麼|說什麼|在講|內容|大概|主要|介紹|概述|概要|重點|大綱|章節|目錄|主題|有哪些|學什麼|學甚麼|教什麼|教甚麼')
@@ -1839,11 +1862,6 @@ class CourseManager(object):
         """
         cd=self._course_dir(cid)
         try:
-            # Chapters the model already failed to write on this same text, after every automatic retry,
-            # get their key sentences now instead of waiting for another model attempt.
-            try:self._settle(cid,early=True)
-            except CourseDeleted:raise
-            except Exception as error:print('Early settling skipped: %s'%error,flush=True)   # never blocks the lectures
             with self.manifest_lock:
                 rows=[json.loads(x) for x in (cd/'chunks.jsonl').read_text(encoding='utf-8').splitlines() if x]
                 manifest=self.manifest(cid);units=manifest['units']
@@ -1860,21 +1878,23 @@ class CourseManager(object):
                 """Already done: counted at once, never visited again."""
                 if unit.get('source_blocked'):return False
                 if unit.get('script_status')=='ready' and unit.get('script') and unit.get('script_review_revision')==REVIEW_REVISION:
-                    # Key sentences stand in for a lecture until new material (for example
+                    # Key points stand in for a lecture until new material (for example
                     # figure readings) arrives; then a written lecture is tried again.
                     return not (unit.get('script_kind')=='source_excerpts' and (unit.get('script_evidence')!=fingerprint(unit) or _CONTACT.search(unit.get('script') or '')))
-                return unit.get('script_status')=='skipped' and unit.get('script_evidence')==fingerprint(unit)   # settled: nothing new to read since
+                return False
 
             def wanted(unit):
                 if unit.get('source_blocked'):return False
-                if unit.get('script_status')=='error' and unit.get('script_evidence')==fingerprint(unit) and _content_failure(unit):
-                    # Same evidence already failed every variant: try once more on the final pass.
+                if unit.get('script_kind')=='source_excerpts' and _CONTACT.search(unit.get('script') or ''):return 'excerpts'
+                if unit.get('script_status')=='skipped':return 'excerpts'   # every chapter has a lecture page
+                if unit.get('script_status')=='error' and unit.get('script_evidence')==fingerprint(unit):
+                    # The model already failed on exactly this text. While chapters are still arriving it waits for
+                    # the final pass; then the chapter's key points are written, with no further wait.
                     if not final:
                         with guard:state['errors'].append('%s: %s'%(unit['title'],unit.get('script_error') or 'not ready'))
                         return False
-                    if int(unit.get('script_attempts') or 0)>=2:
-                        return 'excerpts'   # rejected twice: the chapter's own key sentences, no model call
-                return True   # never tried, new material, or stopped by a model/connection problem
+                    return 'excerpts'
+                return True   # never tried, or new material for it
 
             def take():
                 with guard:
@@ -1912,46 +1932,30 @@ class CourseManager(object):
                             'script_variant':v,'script_evidence':evidence,'script_kind':'context' if v=='context' else 'written'}))
                         return
                 content_failure=isinstance(last,MissingLectureSource) or _lecture_retryable(last)
-                attempts=int(unit.get('script_attempts') or 0)+(1 if content_failure else 0)
                 if unit.get('script_kind')=='source_excerpts' and not content_failure and not _CONTACT.search(unit.get('script') or ''):
                     with guard:state['completed']+=1
-                    return   # model unavailable: the key sentences stay until the next try
-                if not content_failure and unit.get('script_status')=='error' and unit.get('script_failure')=='transport' \
-                        and unit.get('script_evidence')==evidence and time.time()-float(unit.get('script_failed_at') or 0)>=LECTURE_TRANSPORT_GAP_SEC:
-                    # The model could not write this chapter in an earlier pass either, long enough ago: it is
-                    # not a passing hiccup. The chapter's own key sentences stand in (written again when new
-                    # material arrives); nothing in it to say means there is no lecture to give.
-                    stand_in=_source_excerpt_lecture(unit,grouped.get(unit['id'],[]))
+                    return   # model unavailable: the key points stay until the next try
+                if final:
+                    # Not written this time: the chapter's key points now, never a wait. A written lecture
+                    # replaces them if new material for the chapter arrives.
+                    stand_in=_key_points_lecture(unit,own,_neighbor_chunks(units,grouped,i))
                     with guard:state['completed']+=1
-                    if stand_in:
-                        self._update_manifest(cid,lambda m,n=i,value=stand_in:m['units'][n].update({
-                            'script':value,'script_status':'ready','script_error':'','script_review_revision':REVIEW_REVISION,
-                            'script_kind':'source_excerpts','script_evidence':evidence,'script_failure':''}))
-                    else:self._update_manifest(cid,lambda m,n=i:m['units'][n].update({'script':'','script_status':'skipped','script_evidence':evidence,'script_failure':''}))
+                    self._update_manifest(cid,lambda m,n=i,value=stand_in:m['units'][n].update({
+                        'script':value,'script_status':'ready','script_error':'','script_review_revision':REVIEW_REVISION,
+                        'script_kind':'source_excerpts','script_evidence':evidence,'script_failure':'','script_needs_source':False}))
                     return
-                if content_failure and (unit.get('script_kind')=='source_excerpts' or (final and attempts>=2)):
-                    # Written twice and rejected twice: the chapter's own key sentences instead.
-                    excerpts=_source_excerpt_lecture(unit,grouped.get(unit['id'],[]))
-                    if excerpts:
-                        with guard:state['completed']+=1
-                        self._update_manifest(cid,lambda m,n=i,value=excerpts,a=attempts:m['units'][n].update({
-                            'script':value,'script_status':'ready','script_error':'','script_review_revision':REVIEW_REVISION,
-                            'script_kind':'source_excerpts','script_evidence':evidence,'script_attempts':a}))
-                        return
+                attempts=int(unit.get('script_attempts') or 0)+(1 if content_failure else 0)
                 with guard:state['errors'].append('%s: %s'%(unit['title'],last))
                 self._update_manifest(cid,lambda m,n=i,err=str(last),missing=isinstance(last,MissingLectureSource),a=attempts,kind='content' if content_failure else 'transport':m['units'][n].update({
                     'script':'','script_status':'error','script_error':err,'script_needs_source':missing,'script_evidence':evidence,
-                    'script_attempts':a,'script_failure':kind,'script_failed_at':time.time()}))
+                    'script_attempts':a,'script_failure':kind}))
 
             def excerpt(i):
-                unit=units[i];text=_source_excerpt_lecture(unit,grouped.get(unit['id'],[]))
-                if not text:
-                    with guard:state['errors'].append('%s: %s'%(unit['title'],unit.get('script_error') or 'not ready'))
-                    return
+                unit=units[i];text=_key_points_lecture(unit,grouped.get(unit['id'],[]),_neighbor_chunks(units,grouped,i))
                 with guard:state['completed']+=1
                 self._update_manifest(cid,lambda m,n=i,value=text,evidence=fingerprint(unit):m['units'][n].update({
                     'script':value,'script_status':'ready','script_error':'','script_review_revision':REVIEW_REVISION,
-                    'script_kind':'source_excerpts','script_evidence':evidence}))
+                    'script_kind':'source_excerpts','script_evidence':evidence,'script_failure':'','script_needs_source':False}))
 
             def worker():
                 while True:
@@ -1976,7 +1980,6 @@ class CourseManager(object):
             self._update_manifest(cid,lambda m:m['preparation']['lectures'].update({'status':'partial' if left else 'ready',
                 'error':'; '.join(state['errors'])[:1000],'completed_units':done,'total_units':len(units),
                 'message':'Chinese lectures ready: %s / %s'%(done,len(units))+('; %s chapters are tried again automatically'%left if left else '')}))
-            if left:self._settle(cid)
         except CourseDeleted:raise
         except Exception as e:
             self._update_manifest(cid,lambda m:m['preparation']['lectures'].update({'status':'error','error':str(e),'message':'Chinese lecture preparation stopped'}))
@@ -2130,65 +2133,25 @@ class CourseManager(object):
         if lectures:self._start_preparation(cid,model_key,model_call,force=True,only=('lectures',))
         if questions:self._start_preparation(cid,model_key,model_call,force=True,only=('questions',))
 
-    def _settle(self,cid,early=False):
-        """A chapter that still has no lecture or practice questions after every
-        automatic retry is settled instead of staying "in progress" for ever: it is
-        left out of the counts, and it is written again if new material for it ever
-        arrives (_after_new_material), for example from figure reading, which is a
-        supplement and is never waited for.
-
-        A lecture the model could not write because of a model or connection problem
-        (not because the draft was rejected) is settled with the chapter's own key
-        sentences, which need no model, so the course never waits on it for ever.
-        early=True does only that, before another model attempt is made."""
+    def _settle(self,cid):
+        """A chapter that still has no practice questions after every automatic retry is
+        counted out instead of staying "in progress" for ever, and is written again if
+        new material for it arrives (_after_new_material), for example from figure
+        reading, which is a supplement and is never waited for. Lectures need no
+        settling: every chapter always has a lecture page (_key_points_lecture)."""
         m=self.manifest(cid) or {}
         if m.get('ingestion_complete') is False:return False
-        prep=m.get('preparation') or {}
-        def exhausted(kind,states=('partial',)):
-            info=prep.get(kind) or {}
-            return info.get('status') in states and int(info.get('auto_retries') or 0)>=PREPARATION_RETRIES
-        # At the start of a lecture run the step may still say 'preparing' from before a restart.
-        lectures=exhausted('lectures',('partial','preparing','error') if early else ('partial',));questions=exhausted('questions') and not early
-        if not (lectures or questions):return False
-        stalled={}
-        if lectures:
-            grouped={}
-            path=self._course_dir(cid)/'chunks.jsonl'
-            if path.exists():
-                for line in path.read_text(encoding='utf-8').splitlines():
-                    if line:
-                        row=json.loads(line);grouped.setdefault(row.get('unit_id'),[]).append(row)
-            for unit in m.get('units') or []:
-                if unit.get('source_blocked') or unit.get('script_status')!='error' or _content_failure(unit):continue
-                mine=grouped.get(unit['id'],[]);fingerprint=_lecture_fingerprint(mine)
-                if unit.get('script_evidence')!=fingerprint:continue   # new material: the model tries again
-                stalled[unit['id']]=(_source_excerpt_lecture(unit,mine),fingerprint)
+        info=(m.get('preparation') or {}).get('questions') or {}
+        if not (info.get('status')=='partial' and int(info.get('auto_retries') or 0)>=PREPARATION_RETRIES):return False
         def settle(current):
             usable=[u for u in current.get('units') or [] if not u.get('source_blocked')]
-            if lectures:
-                for unit in usable:
-                    if unit.get('script_status')!='error':continue
-                    if _content_failure(unit):
-                        if not early:unit['script_status']='skipped'
-                    elif unit['id'] in stalled:
-                        text,fingerprint=stalled[unit['id']]
-                        if text:
-                            unit.update({'script':text,'script_status':'ready','script_error':'','script_review_revision':REVIEW_REVISION,
-                                'script_kind':'source_excerpts','script_evidence':fingerprint,'script_failure':''})
-                        else:unit.update({'script_status':'skipped','script_evidence':fingerprint})
-                skipped=sum(u.get('script_status')=='skipped' for u in usable)
-                if not any(u.get('script_status')=='error' for u in usable):
-                    ready=sum(u.get('script_status')=='ready' for u in usable)
-                    current['preparation']['lectures'].update({'status':'ready','completed_units':ready,'total_units':ready,
-                        'skipped_units':skipped,'error':'','message':'Chinese lectures ready: %s / %s; %s chapters have too little readable text'%(ready,ready,skipped)})
-            if questions:
-                skipped=0
-                for unit in usable:
-                    if int(unit.get('question_count') or 0)<2:unit['question_skipped']=True;skipped+=1
-                ready=len(usable)-skipped
-                current['preparation']['questions'].update({'status':'ready','completed_units':ready,'total_units':ready,'ready_units':ready,
-                    'skipped_units':skipped,'error':'','message':'%s units have practice questions; %s units have too little readable text'%(ready,skipped)})
-                current['question_generation']=QUESTION_GENERATION
+            skipped=0
+            for unit in usable:
+                if int(unit.get('question_count') or 0)<2:unit['question_skipped']=True;skipped+=1
+            ready=len(usable)-skipped
+            current['preparation']['questions'].update({'status':'ready','completed_units':ready,'total_units':ready,'ready_units':ready,
+                'skipped_units':skipped,'error':'','message':'%s units have practice questions; %s units have too little readable text'%(ready,skipped)})
+            current['question_generation']=QUESTION_GENERATION
         self._update_manifest(cid,settle)
         return True
 
