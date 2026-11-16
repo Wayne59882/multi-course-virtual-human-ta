@@ -1811,23 +1811,23 @@ class CourseManager(object):
             grouped={}
             for row in rows:grouped.setdefault(row['unit_id'],[]).append(row)
             course_name=(manifest or {}).get('course_name','')
-            guard=threading.Lock();state={'completed':0,'errors':[],'pending':list(range(len(units)))}
+            guard=threading.Lock();state={'completed':0,'errors':[],'pending':[]}
 
             def fingerprint(unit):
                 text='\n'.join(str(row.get('text') or '') for row in grouped.get(unit['id'],[]))
                 return hashlib.sha256(('%s|%s'%(REVIEW_REVISION,text)).encode('utf-8')).hexdigest()[:20]
 
-            def wanted(unit):
+            def finished(unit):
+                """Already done: counted at once, never visited again."""
                 if unit.get('source_blocked'):return False
                 if unit.get('script_status')=='ready' and unit.get('script') and unit.get('script_review_revision')==REVIEW_REVISION:
                     # Key sentences stand in for a lecture until new material (for example
                     # figure readings) arrives; then a written lecture is tried again.
-                    if unit.get('script_kind')=='source_excerpts' and unit.get('script_evidence')!=fingerprint(unit):return True
-                    with guard:state['completed']+=1
-                    return False
-                if unit.get('script_status')=='skipped' and unit.get('script_evidence')==fingerprint(unit):
-                    with guard:state['completed']+=1
-                    return False   # settled: nothing new to read since
+                    return not (unit.get('script_kind')=='source_excerpts' and unit.get('script_evidence')!=fingerprint(unit))
+                return unit.get('script_status')=='skipped' and unit.get('script_evidence')==fingerprint(unit)   # settled: nothing new to read since
+
+            def wanted(unit):
+                if unit.get('source_blocked'):return False
                 if unit.get('script_status')=='error' and unit.get('script_evidence')==fingerprint(unit) and _content_failure(unit):
                     # Same evidence already failed every variant: try once more on the final pass.
                     if not final:
@@ -1911,6 +1911,12 @@ class CourseManager(object):
                     with guard:done=state['completed']
                     self._update_manifest(cid,lambda m,done=done:m['preparation']['lectures'].update({'completed_units':done,'total_units':len(units),'message':'Chinese lectures ready: %s / %s'%(done,len(units))}))
 
+            # Chapters that are already done count from the start; the progress shown never falls back to 0
+            # while a slow chapter is being written.
+            state['pending']=[i for i,unit in enumerate(units) if not finished(unit)]
+            state['completed']=sum(finished(unit) for unit in units)
+            done=state['completed']
+            self._update_manifest(cid,lambda m,done=done:m['preparation']['lectures'].update({'completed_units':done,'total_units':len(units),'message':'Chinese lectures ready: %s / %s'%(done,len(units))}))
             self._parallel(cid,'text','lectures',worker,gpu_policy.background_slots())
             # One chapter that is not ready does not stop the others: 'partial'
             # lists it and it is tried again automatically.

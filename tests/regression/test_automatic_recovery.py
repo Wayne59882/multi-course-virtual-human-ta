@@ -344,6 +344,17 @@ with tempfile.TemporaryDirectory() as temporary:
     unit=manager.manifest('course')['units'][2]
     assert unit['script_status']=='ready' and unit['script_kind']=='context' and unit['script_variant']=='context',unit
     assert len(seen_calls)==1 and '【前後章節教材】' in seen_calls[0] and 'RNA polymerase' in seen_calls[0]
+    # Finished lectures count from the start: a slow first chapter never shows the row as 0 / N.
+    manager._update_manifest('course',lambda m:(m['units'][0].update(script_status='error',script='',script_failure='transport',script_error='timeout',script_kind=None),
+        m['units'][2].update(script_status='ready',script=CHINESE,script_kind='written',script_review_revision=cr.REVIEW_REVISION,script_evidence='x'),
+        m['preparation']['lectures'].update(status='partial',completed_units=0)))
+    shown=[]
+    def slow_first(key,system,user,limit):
+        shown.append(manager.manifest('course')['preparation']['lectures']['completed_units']);return CHINESE
+    with patch.object(cr,'review_text',lambda kind,script,*a,**k:(script,{})):
+        manager._prepare_lectures('course','gemma',slow_first)
+    assert shown and shown[0]==2,'two of three were already written: %s'%shown
+    assert manager.manifest('course')['preparation']['lectures']['completed_units']==3
     # A written chapter is not written again when images are read later.
     started=[];manager._start_preparation=lambda cid,key,call,force=False,only=None:started.append(only)
     manager._update_manifest('course',lambda m:m['preparation'].update(lectures={'status':'ready'},questions={'status':'ready'}))
