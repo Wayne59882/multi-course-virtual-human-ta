@@ -917,6 +917,15 @@ def _key_points_lecture(unit,own):
 # Key points once borrowed lines from the chapters around a chapter; those pages are written again.
 _BORROWED=('From the chapters around it','前後章節的相關重點')
 
+def _stale_lecture(unit):
+    """A saved lecture page that must be made again: key points that hold a teacher's contact details or lines
+    borrowed from another chapter, or a lecture written from neighbours that may belong to another PDF."""
+    script=unit.get('script') or ''
+    if unit.get('source_blocked') or unit.get('script_status')!='ready' or not script:return False
+    if unit.get('script_kind')=='source_excerpts':return bool(_CONTACT.search(script)) or any(mark in script for mark in _BORROWED)
+    if unit.get('script_kind')=='context':return unit.get('script_context')!='same-pdf'
+    return False
+
 _OVERVIEW_ZH_WHOLE=re.compile(r'整本|整門|整个|整個|整堂|這本|这本|這門|这门|這份|这份|這堂|这堂|這個課程|这个课程|這個教材|这个教材|這套|本課程|本教材|本書|這學期|這個課')
 _OVERVIEW_ZH_ASK=re.compile(r'講什麼|講甚麼|講些什麼|說什麼|在講|內容|大概|主要|介紹|概述|概要|重點|大綱|章節|目錄|主題|有哪些|學什麼|學甚麼|教什麼|教甚麼')
 _OVERVIEW_EN_WHOLE=re.compile(r'\b(?:this|the\s+whole|the\s+entire|whole|entire)\s+(?:course|book|textbook|material|materials|slides|deck|class|syllabus)\b',re.I)
@@ -1263,6 +1272,10 @@ class CourseManager(object):
                 if current.get('source_review'):
                     current['source_review']=_review_summary((current['source_review'].get('units') or {}))
             man=self._update_manifest(man['course_id'],refresh) or man
+            if ((man.get('preparation') or {}).get('lectures') or {}).get('status')=='ready' and any(_stale_lecture(u) for u in man.get('units') or []):
+                # Lecture pages saved by an earlier version (another chapter's lines under this chapter's name) are
+                # made again; a "ready" step would otherwise never be visited after a restart.
+                man=self._update_manifest(man['course_id'],lambda current:current['preparation']['lectures'].update({'status':'partial','error':'','message':'Refreshing lecture pages'})) or man
             prep=man.get('preparation') or {}
             if (prep.get('sources') or {}).get('status')=='preparing':
                 # A source re-read stopped by a restart would otherwise show its last page forever.
@@ -1876,20 +1889,16 @@ class CourseManager(object):
 
             def finished(unit):
                 """Already done: counted at once, never visited again."""
-                if unit.get('source_blocked'):return False
+                if unit.get('source_blocked') or _stale_lecture(unit):return False
                 if unit.get('script_status')=='ready' and unit.get('script') and unit.get('script_review_revision')==REVIEW_REVISION:
-                    script=unit.get('script') or ''
-                    if unit.get('script_kind')=='context' and unit.get('script_context')!='same-pdf':return False   # may hold another PDF's topic
                     # Key points stand in for a lecture until new material (for example
                     # figure readings) arrives; then a written lecture is tried again.
-                    return not (unit.get('script_kind')=='source_excerpts' and (unit.get('script_evidence')!=fingerprint(unit)
-                                or _CONTACT.search(script) or any(mark in script for mark in _BORROWED)))
+                    return not (unit.get('script_kind')=='source_excerpts' and unit.get('script_evidence')!=fingerprint(unit))
                 return False
 
             def wanted(unit):
                 if unit.get('source_blocked'):return False
-                script=unit.get('script') or ''
-                if unit.get('script_kind')=='source_excerpts' and (_CONTACT.search(script) or any(mark in script for mark in _BORROWED)):return 'excerpts'
+                if unit.get('script_kind')=='source_excerpts' and _stale_lecture(unit):return 'excerpts'
                 if unit.get('script_status')=='skipped':return 'excerpts'   # every chapter has a lecture page
                 if unit.get('script_status')=='error' and unit.get('script_evidence')==fingerprint(unit):
                     # The model already failed on exactly this text. While chapters are still arriving it waits for

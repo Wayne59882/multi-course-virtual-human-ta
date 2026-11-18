@@ -440,6 +440,20 @@ with tempfile.TemporaryDirectory() as temporary:
     assert lecture_calls()==0
     fixed=manager.manifest('course')['units'][0]
     assert 'chapters around' not in fixed['script'] and fixed['script_kind']=='source_excerpts',fixed
+    # After a restart, a finished course whose saved pages hold another chapter's lines is queued again
+    # (a "ready" step is otherwise never visited), and a clean course is left alone.
+    manager._update_manifest('course',lambda m:(m['units'][0].update(script=borrowed,script_status='ready',script_kind='source_excerpts',script_review_revision=cr.REVIEW_REVISION,
+        script_evidence=fingerprint_of('unit1')),m['preparation']['lectures'].update(status='ready',completed_units=3,total_units=3)))
+    queued=[];real_start,real_supervise=manager._start_preparation,manager.supervise
+    manager._start_preparation=lambda cid,key,call,force=False,only=None:queued.append(cid);manager.supervise=lambda call:None
+    try:
+        manager.resume_pending(model_call)
+        assert queued==['course'] and manager.manifest('course')['preparation']['lectures']['status']=='partial',queued
+        manager._update_manifest('course',lambda m:(m['units'][0].update(script=CHINESE,script_kind='written'),m['preparation']['lectures'].update(status='ready'),m.update(status='ready')))
+        queued.clear();manager.resume_pending(model_call)
+        assert manager.manifest('course')['preparation']['lectures']['status']=='ready','clean lecture pages are not queued again'
+    finally:manager._start_preparation,manager.supervise=real_start,real_supervise
+
     # A context lecture saved before neighbours were limited to one PDF may hold another topic: it is made again once.
     manager._update_manifest('course',lambda m:(m['units'][0].update(script=CHINESE,script_status='ready',script_kind='context',script_context=None),
         m['preparation']['lectures'].update(status='partial',completed_units=2,total_units=3)))
