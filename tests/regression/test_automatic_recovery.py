@@ -425,8 +425,8 @@ with tempfile.TemporaryDirectory() as temporary:
     page=cr._key_points_lecture(sparse,[{'text':'Seminar of Genomic Study\n2025 Spring Semester\nLiang-Chuan Lai\nEmail: llai@ntu.edu.tw\nPh: 23123456 ext. 288241'}])
     assert page.startswith('Key points from the course material: Transcriptome') and 'Seminar of Genomic Study' in page
     assert '@' not in page and '23123456' not in page and 'chapters around' not in page
-    assert 'very little text' in cr._key_points_lecture(sparse,[{'text':'1\n2'}])
-    assert '本章投影片文字很少' in cr._key_points_lecture({'id':'u','title':'轉錄體'},[])
+    assert cr._key_points_lecture(sparse,[{'text':'1\n2'}])=='Key points from the course material: Transcriptome','nothing but the title: no remark about missing text'
+    assert cr._key_points_lecture({'id':'u','title':'轉錄體'},[])=='本章重點（摘自教材原文）: 轉錄體'
     # Neighbouring pages come from the same PDF only.
     pdf_units=[{'id':'a','source_file':'transcriptome.pdf'},{'id':'b','source_file':'transcriptome.pdf'},{'id':'c','source_file':'cancer.pdf'}]
     pdf_rows={'a':[{'text':'x'*700}],'b':[{'text':'RNA polymerase binds the promoter and starts transcription of the gene. '*12}],'c':[{'text':'Human cancers increase as a function of age and genetic changes. '*12}]}

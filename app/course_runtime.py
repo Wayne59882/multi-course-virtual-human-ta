@@ -903,16 +903,15 @@ def _source_outline_lecture(chunks,limit=40):
 
 def _key_points_lecture(unit,own):
     """Every chapter has a lecture page. When the model has not written one, this is the chapter's own key
-    points: its sentences or slide points, unchanged. A chapter with hardly any text says so; nothing from
-    other chapters is put under its name. Written again when new material arrives."""
+    points: its sentences or slide points, unchanged and tidied. Nothing is said about what is missing and nothing from other
+    chapters is put under its name. Written again when new material arrives."""
     text=_source_excerpt_lecture(unit,own)
     if text:return text
     title=re.sub(r'\s+',' ',str(unit.get('title') or '')).strip()
     lines=_outline_lines(own)
     chinese=_is_chinese(' '.join(lines+[title]))
     parts=[('本章重點（摘自教材原文）' if chinese else 'Key points from the course material')+(': '+title if title else '')]
-    if lines:parts.append('\n'.join('- '+x for x in lines))
-    else:parts.append('本章投影片文字很少，沒有可整理的重點。' if chinese else 'The slides of this chapter hold very little text, so there are no key points to list.')
+    if lines:parts.append('\n'.join('- '+x for x in lines))   # whatever the chapter has, tidied; no remarks about what is missing
     return '\n\n'.join(parts)
 
 # Key points once borrowed lines from the chapters around a chapter; those pages are written again.
