@@ -419,15 +419,35 @@ with tempfile.TemporaryDirectory() as temporary:
     assert unit['script'].startswith('Slide points from the course material') and 'RNA polymerase' in unit['script']
     assert manager.manifest('course')['preparation']['lectures']['status']=='ready'
 
-    # A chapter whose slides hold only a few words still gets a lecture page: its own points, then the
-    # points of the chapters around it; with nothing readable at all, its title and a note.
+    # A chapter whose slides hold only a few words still gets a lecture page made of its OWN words: nothing from
+    # other chapters is put under its name (a title slide once showed another lecture's cancer points).
     sparse={'id':'unit9','title':'Transcriptome'}
-    near=[{'text':'Transcription copies a gene\nRNA polymerase binds the promoter\nSplicing removes introns'}]
-    page=cr._key_points_lecture(sparse,[{'text':'Seminar of Genomic Study\n2025 Spring Semester\nLiang-Chuan Lai\nEmail: llai@ntu.edu.tw\nPh: 23123456 ext. 288241'}],near)
-    assert page.startswith('Key points from the course material: Transcriptome') and 'Seminar of Genomic Study' in page and 'RNA polymerase binds the promoter' in page
-    assert '@' not in page and '23123456' not in page
-    assert cr._key_points_lecture(sparse,[{'text':'1\n2'}],[])
-    assert '本章投影片文字很少' in cr._key_points_lecture({'id':'u','title':'轉錄體'},[],[])
+    page=cr._key_points_lecture(sparse,[{'text':'Seminar of Genomic Study\n2025 Spring Semester\nLiang-Chuan Lai\nEmail: llai@ntu.edu.tw\nPh: 23123456 ext. 288241'}])
+    assert page.startswith('Key points from the course material: Transcriptome') and 'Seminar of Genomic Study' in page
+    assert '@' not in page and '23123456' not in page and 'chapters around' not in page
+    assert 'very little text' in cr._key_points_lecture(sparse,[{'text':'1\n2'}])
+    assert '本章投影片文字很少' in cr._key_points_lecture({'id':'u','title':'轉錄體'},[])
+    # Neighbouring pages come from the same PDF only.
+    pdf_units=[{'id':'a','source_file':'transcriptome.pdf'},{'id':'b','source_file':'transcriptome.pdf'},{'id':'c','source_file':'cancer.pdf'}]
+    pdf_rows={'a':[{'text':'x'*700}],'b':[{'text':'RNA polymerase binds the promoter and starts transcription of the gene. '*12}],'c':[{'text':'Human cancers increase as a function of age and genetic changes. '*12}]}
+    around=cr._neighbor_chunks(pdf_units,pdf_rows,0)
+    assert around and all('cancer' not in row['text'] for row in around),around
+    assert cr._neighbor_chunks(pdf_units,pdf_rows,2)==[],'the only chapter of its PDF has nothing to borrow'
+    # Pages saved earlier with borrowed lines, or written from other PDFs, are made again from the chapter's own words.
+    borrowed='Key points from the course material: Transcriptome\n\n- Seminar of Genomic Study\n\nFrom the chapters around it\n- How Cancer Arises?'
+    manager._update_manifest('course',lambda m:(m['units'][0].update(script=borrowed,script_status='ready',script_kind='source_excerpts',script_review_revision=cr.REVIEW_REVISION,
+        script_evidence=fingerprint_of('unit1')),m['preparation']['lectures'].update(status='partial',completed_units=2,total_units=3)))
+    assert lecture_calls()==0
+    fixed=manager.manifest('course')['units'][0]
+    assert 'chapters around' not in fixed['script'] and fixed['script_kind']=='source_excerpts',fixed
+    # A context lecture saved before neighbours were limited to one PDF may hold another topic: it is made again once.
+    manager._update_manifest('course',lambda m:(m['units'][0].update(script=CHINESE,script_status='ready',script_kind='context',script_context=None),
+        m['preparation']['lectures'].update(status='partial',completed_units=2,total_units=3)))
+    lecture_calls()
+    again=manager.manifest('course')['units'][0]
+    assert again['script_status']=='ready' and (again.get('script_context')=='same-pdf' or again['script_kind']!='context'),again
+    manager._update_manifest('course',lambda m:m['units'][0].update(script=CHINESE,script_status='ready',script_kind='written'))
+
     # A title slide gives no lecture: a teacher's e-mail address and phone number are not teaching material.
     title_slide=[{'text':'Seminar of Genomic Study\n2025 Spring Semester\nLiang-Chuan Lai\nEmail: llai@ntu.edu.tw\nPh: 23123456 ext. 288241'}]
     assert cr._source_outline_lecture(title_slide)=='' and '@' not in cr._source_excerpt_lecture({},title_slide)
@@ -458,4 +478,4 @@ with tempfile.TemporaryDirectory() as temporary:
         oc.note_student_activity()
         assert cpu_budget.cpu_workers()==2
         with patch.dict(os.environ,{'VQ_CPU_BUSY_WINDOW_SEC':'0'}):assert cpu_budget.cpu_workers()==4
-print('PASS automatic recovery: image-heavy chapters are written from the text around them (lecture and questions) without forced image reading, every chapter always has a lecture page (written by the model, else its key points, else the points of the chapters around it) with no waiting or retries; one chapter never stops the others, rejected lectures are asked differently with cleaner material first, chapters prepare in parallel, a failed chapter waits for the final pass only while chapters are still arriving, figures try crop/page/halves and never block, only pages with no text are re-read (once, not blank pages), Retry restarts only stopped steps, stopped steps restart by themselves (3 times, growing pauses), a restarting model server only pauses preparation, OCR 4 quiet / 2 busy')
+print('PASS automatic recovery: image-heavy chapters are written from the text around them (lecture and questions) without forced image reading, every chapter always has a lecture page (written by the model, else its own key points; never from another chapter) with no waiting or retries; one chapter never stops the others, rejected lectures are asked differently with cleaner material first, chapters prepare in parallel, a failed chapter waits for the final pass only while chapters are still arriving, figures try crop/page/halves and never block, only pages with no text are re-read (once, not blank pages), Retry restarts only stopped steps, stopped steps restart by themselves (3 times, growing pauses), a restarting model server only pauses preparation, OCR 4 quiet / 2 busy')

@@ -774,17 +774,17 @@ def _lecture_evidence(unit,chunks,max_chars=6200,min_quality=0.0):
 
 
 def _neighbor_chunks(units,by_unit,index,budget=4200):
-    """Readable passages of the chapters around chapter `index` (nearest first, then in
-    course order). A chapter that is mostly slide images gives only keywords; the text
-    of the chapters before and after it is the context its lecture and questions use,
-    instead of reading the images harder."""
+    """Readable passages of the chapters around chapter `index` in the SAME PDF (nearest first, then in
+    course order). A chapter that is mostly slide images gives only keywords; the text of the chapters
+    before and after it in that lecture file is the context its lecture and questions use, instead of
+    reading the images harder. Another PDF is another topic, so it is never borrowed from."""
     picked=[]
     for threshold in (0.45,0.25):
         picked=[];used=0
         for distance in range(1,5):
             for side in (-1,1):
                 j=index+side*distance
-                if j<0 or j>=len(units) or units[j].get('source_blocked'):continue
+                if j<0 or j>=len(units) or units[j].get('source_blocked') or units[j].get('source_file')!=units[index].get('source_file'):continue
                 for k,row in enumerate(by_unit.get(units[j]['id'],[])):
                     text=str(row.get('text') or '').strip()
                     if not text or text_issues(text) or _passage_quality(text)<threshold or used+len(text)+2>budget:continue
@@ -901,21 +901,22 @@ def _source_outline_lecture(chunks,limit=40):
     heading='本章投影片重點（摘自教材原文）' if _is_chinese(' '.join(lines)) else 'Slide points from the course material'
     return heading+'\n\n'+'\n'.join('- '+x for x in lines)
 
-def _key_points_lecture(unit,own,near):
-    """Every chapter has a lecture page. When the model has not written one, this is the chapter's key
-    points: its own sentences or slide points, and when its slides hold only a few words, the key points
-    of the chapters around it. Always something; written again when new material arrives."""
+def _key_points_lecture(unit,own):
+    """Every chapter has a lecture page. When the model has not written one, this is the chapter's own key
+    points: its sentences or slide points, unchanged. A chapter with hardly any text says so; nothing from
+    other chapters is put under its name. Written again when new material arrives."""
     text=_source_excerpt_lecture(unit,own)
     if text:return text
     title=re.sub(r'\s+',' ',str(unit.get('title') or '')).strip()
-    lines=_outline_lines(own);own_keys=set(x.lower() for x in lines)
-    borrowed=[x for x in _outline_lines(near) if x.lower() not in own_keys][:12] if sum(len(x) for x in lines)<120 else []
-    chinese=_is_chinese(' '.join(lines+borrowed+[title]))
+    lines=_outline_lines(own)
+    chinese=_is_chinese(' '.join(lines+[title]))
     parts=[('本章重點（摘自教材原文）' if chinese else 'Key points from the course material')+(': '+title if title else '')]
     if lines:parts.append('\n'.join('- '+x for x in lines))
-    if borrowed:parts.append(('前後章節的相關重點' if chinese else 'From the chapters around it')+'\n'+'\n'.join('- '+x for x in borrowed))
-    if not lines and not borrowed:parts.append('本章投影片文字很少，請對照投影片與前後章節。' if chinese else 'The slides of this chapter hold very little text; see the slides and the chapters around it.')
+    else:parts.append('本章投影片文字很少，沒有可整理的重點。' if chinese else 'The slides of this chapter hold very little text, so there are no key points to list.')
     return '\n\n'.join(parts)
+
+# Key points once borrowed lines from the chapters around a chapter; those pages are written again.
+_BORROWED=('From the chapters around it','前後章節的相關重點')
 
 _OVERVIEW_ZH_WHOLE=re.compile(r'整本|整門|整个|整個|整堂|這本|这本|這門|这门|這份|这份|這堂|这堂|這個課程|这个课程|這個教材|这个教材|這套|本課程|本教材|本書|這學期|這個課')
 _OVERVIEW_ZH_ASK=re.compile(r'講什麼|講甚麼|講些什麼|說什麼|在講|內容|大概|主要|介紹|概述|概要|重點|大綱|章節|目錄|主題|有哪些|學什麼|學甚麼|教什麼|教甚麼')
@@ -1878,14 +1879,18 @@ class CourseManager(object):
                 """Already done: counted at once, never visited again."""
                 if unit.get('source_blocked'):return False
                 if unit.get('script_status')=='ready' and unit.get('script') and unit.get('script_review_revision')==REVIEW_REVISION:
+                    script=unit.get('script') or ''
+                    if unit.get('script_kind')=='context' and unit.get('script_context')!='same-pdf':return False   # may hold another PDF's topic
                     # Key points stand in for a lecture until new material (for example
                     # figure readings) arrives; then a written lecture is tried again.
-                    return not (unit.get('script_kind')=='source_excerpts' and (unit.get('script_evidence')!=fingerprint(unit) or _CONTACT.search(unit.get('script') or '')))
+                    return not (unit.get('script_kind')=='source_excerpts' and (unit.get('script_evidence')!=fingerprint(unit)
+                                or _CONTACT.search(script) or any(mark in script for mark in _BORROWED)))
                 return False
 
             def wanted(unit):
                 if unit.get('source_blocked'):return False
-                if unit.get('script_kind')=='source_excerpts' and _CONTACT.search(unit.get('script') or ''):return 'excerpts'
+                script=unit.get('script') or ''
+                if unit.get('script_kind')=='source_excerpts' and (_CONTACT.search(script) or any(mark in script for mark in _BORROWED)):return 'excerpts'
                 if unit.get('script_status')=='skipped':return 'excerpts'   # every chapter has a lecture page
                 if unit.get('script_status')=='error' and unit.get('script_evidence')==fingerprint(unit):
                     # The model already failed on exactly this text. While chapters are still arriving it waits for
@@ -1894,7 +1899,7 @@ class CourseManager(object):
                         with guard:state['errors'].append('%s: %s'%(unit['title'],unit.get('script_error') or 'not ready'))
                         return False
                     return 'excerpts'
-                return True   # never tried, or new material for it
+                return True   # never tried, or new material for it, or a context lecture that may hold another PDF's topic
 
             def take():
                 with guard:
@@ -1910,11 +1915,14 @@ class CourseManager(object):
                 own=grouped.get(unit['id'],[])
                 # A chapter that is mostly slide images has only keywords: it is written from those and
                 # the text of the chapters around it (no forced image reading), then the usual variants.
-                plan=['context',0] if _own_sentence_text(own)<400 else list(range(len(LECTURE_VARIANTS)))
+                thin=_own_sentence_text(own)<400;near=_neighbor_chunks(units,grouped,i) if thin else []
+                if thin and not near:   # hardly any text and no other pages of its own PDF to learn from
+                    excerpt(i);return
+                plan=['context',0] if thin else list(range(len(LECTURE_VARIANTS)))
                 for variant in plan:
                     self._alive(cid);steps_mark()
                     try:
-                        if variant=='context':script=_chinese_lecture(unit,own,model_key,model_call,course_name,0,context=_neighbor_chunks(units,grouped,i))
+                        if variant=='context':script=_chinese_lecture(unit,own,model_key,model_call,course_name,0,context=near)
                         else:script=_chinese_lecture(unit,own,model_key,model_call,course_name,variant)
                     except CourseDeleted:raise
                     except Exception as error:
@@ -1929,7 +1937,7 @@ class CourseManager(object):
                         with guard:state['completed']+=1
                         self._update_manifest(cid,lambda m,n=i,value=script,v=variant:m['units'][n].update({
                             'script':value,'script_status':'ready','script_error':'','script_review_revision':REVIEW_REVISION,
-                            'script_variant':v,'script_evidence':evidence,'script_kind':'context' if v=='context' else 'written'}))
+                            'script_variant':v,'script_evidence':evidence,'script_kind':'context' if v=='context' else 'written','script_context':'same-pdf'}))
                         return
                 content_failure=isinstance(last,MissingLectureSource) or _lecture_retryable(last)
                 if unit.get('script_kind')=='source_excerpts' and not content_failure and not _CONTACT.search(unit.get('script') or ''):
@@ -1938,7 +1946,7 @@ class CourseManager(object):
                 if final:
                     # Not written this time: the chapter's key points now, never a wait. A written lecture
                     # replaces them if new material for the chapter arrives.
-                    stand_in=_key_points_lecture(unit,own,_neighbor_chunks(units,grouped,i))
+                    stand_in=_key_points_lecture(unit,own)
                     with guard:state['completed']+=1
                     self._update_manifest(cid,lambda m,n=i,value=stand_in:m['units'][n].update({
                         'script':value,'script_status':'ready','script_error':'','script_review_revision':REVIEW_REVISION,
@@ -1951,7 +1959,7 @@ class CourseManager(object):
                     'script_attempts':a,'script_failure':kind}))
 
             def excerpt(i):
-                unit=units[i];text=_key_points_lecture(unit,grouped.get(unit['id'],[]),_neighbor_chunks(units,grouped,i))
+                unit=units[i];text=_key_points_lecture(unit,grouped.get(unit['id'],[]))
                 with guard:state['completed']+=1
                 self._update_manifest(cid,lambda m,n=i,value=text,evidence=fingerprint(unit):m['units'][n].update({
                     'script':value,'script_status':'ready','script_error':'','script_review_revision':REVIEW_REVISION,
