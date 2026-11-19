@@ -33,6 +33,15 @@ Deployment scripts are operator tools; the offline checks do not execute a real
 Cloudflare login, Tunnel, or deployment. The launcher regression test substitutes
 external commands in a temporary copy of the project.
 
+## Measuring the real hardware footprint
+
+`python3 scripts/diagnostics/measure_footprint.py --minutes 10 --output footprint.json`
+is read-only: it samples the private Ollama (`/api/ps`), `nvidia-smi` and
+`/proc/meminfo` and prints the peak GPU memory held by the loaded models, the peak
+system RAM and the CPU cores. Start it on the teaching server, then use the site
+normally for the whole window (students asking while a course is prepared). It
+sends no prompts and changes no setting.
+
 ## Performance diagnostics
 
 `python3 scripts/diagnostics/performance.py` inspects the host without changing
