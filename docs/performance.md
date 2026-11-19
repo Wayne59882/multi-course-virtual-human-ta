@@ -183,25 +183,3 @@ preparation GPU sharing, the exclusive-mode grace period, quiet-time figure
 reading, automatic recovery, step timeouts and the preparation UI. They use a
 stand-in model server and do not establish a production speedup or the VRAM
 fit of two models on the laboratory's shared GPU.
-
-## Minimum hardware: estimate and how to measure it
-
-The minimum below is **estimated** from model sizes and the GPU-memory thresholds
-above; it has not been benchmarked on a clean deployment. Only the laboratory's
-shared 24 GB RTX A5000 has been used.
-
-| | GPU memory | RAM | Behaviour |
-|---|---|---|---|
-| Estimated minimum | 12 GB NVIDIA GPU | 32 GB | One request at a time; student answers first, course preparation waits |
-| Recommended (validated host) | 24 GB | 32 GB or more | Both models stay loaded; a student answer and two preparation steps run together |
-
-Basis: Gemma 4 12B at Q4 is about 7.6 GB, Ministral 3 8B at Q4 about 6 GB, BGE-M3
-about 1.2 GB, plus roughly 1 GB of cache per 8192-token context. Four CPU cores
-are used by default for PDF extraction and OCR. Without a GPU the models can run
-on the CPU with at least 16 GB RAM, but slowly and untested. Students only need a
-browser; every figure here is for the server.
-
-To replace the estimate with a measurement, run
-[`scripts/diagnostics/measure_footprint.py`](../scripts/diagnostics/measure_footprint.py)
-on the server while students ask questions and a course is being prepared, and
-record its output with the GPU, RAM and date.
