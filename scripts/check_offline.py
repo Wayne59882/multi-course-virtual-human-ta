@@ -115,6 +115,7 @@ def main():
         ("Math and audio lifecycle", [node,str(TESTS / "test_math_audio.cjs")]),
         ("Large PDF and private upload diagnostics", [sys.executable,str(TESTS / "test_large_pdf.py")]),
         ("Footprint measurement script", [sys.executable,str(TESTS / "test_measure_footprint.py")]),
+        ("Minimum specification check", [sys.executable,str(TESTS / "test_check_minimum_spec.py")]),
         ("Teaching-unit names and page ranges", [sys.executable,str(TESTS / "test_unit_detection.py")]),
         ("Text-first course reading", [sys.executable,str(TESTS / "test_text_first_reading.py")]),
         ("OCR installed without administrator rights", [sys.executable,str(TESTS / "test_user_ocr.py")]),
