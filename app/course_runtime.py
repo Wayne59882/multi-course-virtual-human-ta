@@ -858,7 +858,7 @@ def _source_excerpt_lecture(unit,chunks,limit=12):
             for sentence in _SENTENCE_END.split(text):
                 sentence=re.sub(r'\s+',' ',sentence).strip()
                 key=sentence.lower()
-                if 40<=len(sentence)<=320 and _sentence_like(sentence) and not text_issues(sentence) and not _CONTACT.search(sentence) and key not in seen:
+                if 40<=len(sentence)<=320 and _sentence_like(sentence) and not text_issues(sentence) and key not in seen:
                     seen.add(key);candidates.append(sentence)
         if len(candidates)>=3:
             step=max(1.0,len(candidates)/float(limit))
@@ -870,8 +870,6 @@ def _source_excerpt_lecture(unit,chunks,limit=12):
     return heading+'\n\n'+'\n\n'.join(picked)
 
 
-# A teacher's e-mail address or phone number on a title slide is not teaching material.
-_CONTACT=re.compile(r'@|\bext\.?\s*\d|\b(?:ph|tel|fax|mobile|e-?mail)\b\s*[:：]|電話|信箱|分機|手機|聯絡',re.I)
 
 def _outline_lines(chunks):
     """The distinct, readable lines of a chapter's slides, in order, unchanged."""
@@ -880,7 +878,7 @@ def _outline_lines(chunks):
         for raw in str(chunk.get('text') or '').splitlines():
             line=re.sub(r'\s+',' ',raw).strip(' \t-\u2022\u00b7*')
             key=line.lower()
-            if len(line)<4 or len(line)>200 or key in seen or text_issues(line) or _CONTACT.search(line):continue
+            if len(line)<4 or len(line)>200 or key in seen or text_issues(line):continue
             if re.fullmatch(r'[\d\W_]+',line) or sum(c.isalpha() for c in line)<3:continue
             seen.add(key);lines.append(line)
     return lines
@@ -914,10 +912,12 @@ def _key_points_lecture(unit,own):
     if lines:parts.append('\n'.join('- '+x for x in lines))   # whatever the chapter has, tidied; no remarks about what is missing
     return '\n\n'.join(parts)
 
+KEY_POINTS_REVISION='teacher-contact-kept'   # pages written before this kept teachers' contact lines out; they are written again once
+
 def _mostly_chinese(text):
     """Chinese with English terms kept in it (gene names, abbreviations) still counts as a Chinese page."""
     han=len(re.findall(r'[\u3400-\u9fff]',str(text or '')));latin=len(re.findall(r'[A-Za-z]',str(text or '')))
-    return han>=10 and han*10>=(han+latin)*3
+    return han>=6 and han*10>=(han+latin)*2
 
 def _page_body(script):
     return str(script or '').partition('\n\n')[2].strip()
@@ -943,7 +943,7 @@ def _zh_key_points(unit,own,model_key,model_call):
     lines=[re.sub(r'^[\s\-\u2022\u00b7*]+','',x).strip() for x in _clean_text(raw).splitlines()]
     lines=[x for x in lines if x]
     text='\n'.join('- '+x for x in lines)
-    if not lines or _PDF_PRIVATE.search(text) or _CONTACT.search(text) or not _mostly_chinese(text):return page
+    if not lines or _PDF_PRIVATE.search(text) or not _mostly_chinese(text):return page
     if len(re.findall(r'[\u3400-\u9fff]',text))<2*len(lines):return page   # a line that is not Chinese is not a translation
     return '本章重點'+('：'+title if title else '')+'\n\n'+text
 
@@ -951,13 +951,13 @@ def _zh_key_points(unit,own,model_key,model_call):
 _BORROWED=('From the chapters around it','前後章節的相關重點')
 
 def _stale_lecture(unit):
-    """A saved lecture page that must be made again: key points that hold a teacher's contact details or lines
+    """A saved lecture page that must be made again: key points written before teachers' contact lines were kept, or lines
     borrowed from another chapter, or a lecture written from neighbours that may belong to another PDF."""
     script=unit.get('script') or ''
     if unit.get('source_blocked') or unit.get('script_status')!='ready' or not script:return False
     if unit.get('script_kind')=='source_excerpts':
         body=_page_body(script)
-        return bool(_CONTACT.search(script)) or any(mark in script for mark in _BORROWED) or bool(body and not _mostly_chinese(body))
+        return unit.get('script_kp')!=KEY_POINTS_REVISION or any(mark in script for mark in _BORROWED) or bool(body and not _mostly_chinese(body))
     if unit.get('script_kind')=='context':return unit.get('script_context')!='same-pdf'
     return False
 
@@ -989,7 +989,7 @@ def _unit_gist(unit,chunks,limit=220):
         if _passage_quality(text)<0.25:continue
         for sentence in _SENTENCE_END.split(text):
             sentence=re.sub(r'\s+',' ',sentence).strip()
-            if 40<=len(sentence)<=240 and _sentence_like(sentence) and not text_issues(sentence) and not _CONTACT.search(sentence):
+            if 40<=len(sentence)<=240 and _sentence_like(sentence) and not text_issues(sentence):
                 picked.append(sentence);used+=len(sentence)
                 if len(picked)>=2 or used>=limit:return ' '.join(picked)[:limit+60]
     return ' '.join(picked)
@@ -1990,7 +1990,7 @@ class CourseManager(object):
                             'script_variant':v,'script_evidence':evidence,'script_kind':'context' if v=='context' else 'written','script_context':'same-pdf'}))
                         return
                 content_failure=isinstance(last,MissingLectureSource) or _lecture_retryable(last)
-                if unit.get('script_kind')=='source_excerpts' and not content_failure and not _CONTACT.search(unit.get('script') or ''):
+                if unit.get('script_kind')=='source_excerpts' and not content_failure:
                     with guard:state['completed']+=1
                     return   # model unavailable: the key points stay until the next try
                 if final:
@@ -2000,7 +2000,7 @@ class CourseManager(object):
                     with guard:state['completed']+=1
                     self._update_manifest(cid,lambda m,n=i,value=stand_in:m['units'][n].update({
                         'script':value,'script_status':'ready','script_error':'','script_review_revision':REVIEW_REVISION,
-                        'script_kind':'source_excerpts','script_evidence':evidence,'script_failure':'','script_needs_source':False}))
+                        'script_kind':'source_excerpts','script_kp':KEY_POINTS_REVISION,'script_evidence':evidence,'script_failure':'','script_needs_source':False}))
                     return
                 attempts=int(unit.get('script_attempts') or 0)+(1 if content_failure else 0)
                 with guard:state['errors'].append('%s: %s'%(unit['title'],last))
@@ -2013,7 +2013,7 @@ class CourseManager(object):
                 with guard:state['completed']+=1
                 self._update_manifest(cid,lambda m,n=i,value=text,evidence=fingerprint(unit):m['units'][n].update({
                     'script':value,'script_status':'ready','script_error':'','script_review_revision':REVIEW_REVISION,
-                    'script_kind':'source_excerpts','script_evidence':evidence,'script_failure':'','script_needs_source':False}))
+                    'script_kind':'source_excerpts','script_kp':KEY_POINTS_REVISION,'script_evidence':evidence,'script_failure':'','script_needs_source':False}))
 
             def worker():
                 while True:

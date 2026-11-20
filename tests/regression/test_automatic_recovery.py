@@ -438,8 +438,8 @@ with tempfile.TemporaryDirectory() as temporary:
     # other chapters is put under its name (a title slide once showed another lecture's cancer points).
     sparse={'id':'unit9','title':'Transcriptome'}
     page=cr._key_points_lecture(sparse,[{'text':'Seminar of Genomic Study\n2025 Spring Semester\nLiang-Chuan Lai\nEmail: llai@ntu.edu.tw\nPh: 23123456 ext. 288241'}])
-    assert page.startswith('Key points from the course material: Transcriptome') and 'Seminar of Genomic Study' in page
-    assert '@' not in page and '23123456' not in page and 'chapters around' not in page
+    assert page.startswith('Slide points from the course material') and 'Seminar of Genomic Study' in page
+    assert 'llai@ntu.edu.tw' in page and 'Ph: 23123456 ext. 288241' in page and 'chapters around' not in page,page   # the teacher's contact lines stay
     assert cr._key_points_lecture(sparse,[{'text':'1\n2'}])=='Key points from the course material: Transcriptome','nothing but the title: no remark about missing text'
     assert cr._key_points_lecture({'id':'u','title':'轉錄體'},[])=='本章重點（摘自教材原文）: 轉錄體'
     # Neighbouring pages come from the same PDF only.
@@ -462,7 +462,7 @@ with tempfile.TemporaryDirectory() as temporary:
     asked=[]
     def zh_model(key,system,user,budget):
         asked.append(user);return '- 轉錄由 RNA polymerase 啟動\n- 啟動子 (Promoter) 與增強子 (Enhancers) 調控基因表現\n\n- 剪接 (Splicing) 移除內含子 (introns)'
-    def as_unit(page):return {'id':'x','script':page,'script_status':'ready','script_kind':'source_excerpts'}
+    def as_unit(page):return {'id':'x','script':page,'script_status':'ready','script_kind':'source_excerpts','script_kp':cr.KEY_POINTS_REVISION}
     page=cr._zh_key_points(topic,slides,'gemma',zh_model)
     assert page.startswith('本章重點：Transcriptome\n\n- 轉錄由 RNA polymerase 啟動\n- 啟動子') and page.count('\n- ')==3 and not cr._stale_lecture(as_unit(page)),page
     assert 'Promoter' in asked[0] and 'Enhancers' in asked[0],'the model is given the chapter\'s own slide text'
@@ -474,7 +474,7 @@ with tempfile.TemporaryDirectory() as temporary:
     chinese_slides=[{'text':'轉錄是以 DNA 為模板合成 RNA 的過程\n啟動子位於基因的上游\n剪接會移除內含子\n增強子可以提高轉錄效率'}]
     page=cr._zh_key_points(topic,chinese_slides,'gemma',zh_model)
     assert not asked and '增強子可以提高轉錄效率' in page and not cr._stale_lecture(as_unit(page)),'Chinese slides need no model call'
-    assert not cr._stale_lecture({'id':'x','script':'Key points from the course material: Transcriptome','script_status':'ready','script_kind':'source_excerpts'}),'a page with only a title is not retried at every start'
+    assert not cr._stale_lecture({'id':'x','script':'Key points from the course material: Transcriptome','script_status':'ready','script_kind':'source_excerpts','script_kp':cr.KEY_POINTS_REVISION}),'a page with only a title is not retried at every start'
     # A saved English key-points page is made Chinese by that one call, without writing the lecture again.
     seen['key_point_mode']='chinese'
     manager._update_manifest('course',lambda m:(m['units'][1].update(script='Key points from the course material: Respiration 2\n\n- Oxygen diffuses from alveolar gas into blood',script_status='ready',
@@ -523,9 +523,16 @@ with tempfile.TemporaryDirectory() as temporary:
     assert again['script_status']=='ready' and (again.get('script_context')=='same-pdf' or again['script_kind']!='context'),again
     manager._update_manifest('course',lambda m:m['units'][0].update(script=CHINESE,script_status='ready',script_kind='written'))
 
-    # A title slide gives no lecture: a teacher's e-mail address and phone number are not teaching material.
+    # A title slide's lines, the teacher's e-mail address and phone number included, are shown as they are on the slide.
     title_slide=[{'text':'Seminar of Genomic Study\n2025 Spring Semester\nLiang-Chuan Lai\nEmail: llai@ntu.edu.tw\nPh: 23123456 ext. 288241'}]
-    assert cr._source_outline_lecture(title_slide)=='' and '@' not in cr._source_excerpt_lecture({},title_slide)
+    assert 'llai@ntu.edu.tw' in cr._source_outline_lecture(title_slide) and '288241' in cr._source_excerpt_lecture({},title_slide)
+    kept=lambda *a:'- 研討會：Seminar of Genomic Study\n- 2025 春季學期\n- 賴亮全 (Liang-Chuan Lai)\n- 電子郵件：llai@ntu.edu.tw\n- 電話：23123456 分機 288241'
+    page=cr._zh_key_points(sparse,title_slide,'gemma',kept)
+    assert page.startswith('本章重點：Transcriptome') and 'llai@ntu.edu.tw' in page and '288241' in page,page   # in Chinese, contact lines kept
+    saved={'id':'x','script':page,'script_status':'ready','script_kind':'source_excerpts'}
+    assert cr._stale_lecture(saved),'a key-points page written before contact lines were kept is written again once'
+    saved['script_kp']=cr.KEY_POINTS_REVISION
+    assert not cr._stale_lecture(saved)
     assert cr._source_outline_lecture([{'text':'Transcription\nRNA polymerase\nPromoter\nmRNA\nSplicing'}]).startswith('Slide points')
     # "What is this whole course about?" is answered from the chapter list, not from one searched passage.
     for question in ('可以方便跟我講一下就是這一這整本的內容大概是在講什麼','這門課主要在教什麼','What is this whole course about?','Give me an overview of this book'):
