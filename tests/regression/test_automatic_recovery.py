@@ -425,7 +425,14 @@ with tempfile.TemporaryDirectory() as temporary:
     unit=manager.manifest('course')['units'][2]
     assert unit['script_status']=='ready' and unit['script_kind']=='source_excerpts',unit
     assert unit['script'].startswith('Slide points from the course material') and 'RNA polymerase' in unit['script']
-    assert manager.manifest('course')['preparation']['lectures']['status']=='ready'
+    lectures=manager.manifest('course')['preparation']['lectures']
+    assert lectures['status']=='partial' and 'put into Chinese again' in lectures['error'],lectures   # the automatic retries put it into Chinese; no restart needed
+    seen['key_point_mode']='chinese'
+    with patch.object(cr,'review_text',lambda kind,script,*a,**k:(script,{})):
+        manager._prepare_lectures('course','gemma',model_call)
+    assert manager.manifest('course')['units'][2]['script'].startswith('本章重點') and manager.manifest('course')['preparation']['lectures']['status']=='ready'
+    seen['key_point_mode']='busy'
+    manager._update_manifest('course',lambda m:m['units'][2].update(script='Slide points from the course material\n\n- Transcription\n- RNA polymerase\n- Promoter\n- mRNA',script_status='ready',script_kind='source_excerpts',script_review_revision=cr.REVIEW_REVISION,script_evidence=fingerprint_of('unit3')))
 
     # A chapter whose slides hold only a few words still gets a lecture page made of its OWN words: nothing from
     # other chapters is put under its name (a title slide once showed another lecture's cancer points).

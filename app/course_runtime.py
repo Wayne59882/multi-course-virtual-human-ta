@@ -2034,9 +2034,14 @@ class CourseManager(object):
             self._parallel(cid,'text','lectures',worker,gpu_policy.background_slots())
             # One chapter that is not ready does not stop the others: 'partial'
             # lists it and it is tried again automatically.
-            with guard:done=state['completed'];left=len(state['errors'])
+            with guard:done=state['completed'];errors=list(state['errors'])
+            # A page still in the slides' own language (the model was busy for the short Chinese call) is tried again
+            # by the automatic retries, not left for a restart.
+            english=[u['title'] for u in (self.manifest(cid) or {}).get('units') or [] if _stale_lecture(u)]
+            left=len(errors)+len(english)
+            if english:errors.append('%s chapter page(s) are put into Chinese again'%len(english))
             self._update_manifest(cid,lambda m:m['preparation']['lectures'].update({'status':'partial' if left else 'ready',
-                'error':'; '.join(state['errors'])[:1000],'completed_units':done,'total_units':len(units),
+                'error':'; '.join(errors)[:1000],'completed_units':done,'total_units':len(units),
                 'message':'Chinese lectures ready: %s / %s'%(done,len(units))+('; %s chapters are tried again automatically'%left if left else '')}))
         except CourseDeleted:raise
         except Exception as e:
