@@ -914,6 +914,39 @@ def _key_points_lecture(unit,own):
     if lines:parts.append('\n'.join('- '+x for x in lines))   # whatever the chapter has, tidied; no remarks about what is missing
     return '\n\n'.join(parts)
 
+def _mostly_chinese(text):
+    """Chinese with English terms kept in it (gene names, abbreviations) still counts as a Chinese page."""
+    han=len(re.findall(r'[\u3400-\u9fff]',str(text or '')));latin=len(re.findall(r'[A-Za-z]',str(text or '')))
+    return han>=10 and han*10>=(han+latin)*3
+
+def _page_body(script):
+    return str(script or '').partition('\n\n')[2].strip()
+
+KEY_POINT_SYSTEM=('你是課程助教。把下面教材的重點整理成繁體中文條列，供老師講課前快速瀏覽。'
+                  '只整理下面文字明確寫出的內容，不得增加、推測或補充任何資訊。'
+                  '保留英文專有名詞、基因與藥名、數值與縮寫，必要時在中文後以括號附上英文。'
+                  '每個重點一行，以「- 」開頭；不要寫前言、結語、頁碼或來源。')
+
+def _zh_key_points(unit,own,model_key,model_call):
+    """The chapter's key points in Traditional Chinese: the key-points page tidied from the chapter's own
+    slide text, then put into Chinese by one short model call. If the model is busy or answers badly the page
+    stays in the slides' own language rather than waiting; it is put into Chinese again at the next start."""
+    page=_key_points_lecture(unit,own)
+    body=_page_body(page)
+    if not body or _mostly_chinese(body) or model_call is None:return page
+    title=re.sub(r'\s+',' ',str(unit.get('title') or '')).strip()
+    try:
+        raw=model_call(model_key,KEY_POINT_SYSTEM,'單元：'+title+'\n\n教材重點：\n'+body[:3600],min(LECTURE_MAX_TOKENS,1600))
+    except CourseDeleted:raise
+    except Exception:return page
+    if text_issues(raw):return page
+    lines=[re.sub(r'^[\s\-\u2022\u00b7*]+','',x).strip() for x in _clean_text(raw).splitlines()]
+    lines=[x for x in lines if x]
+    text='\n'.join('- '+x for x in lines)
+    if not lines or _PDF_PRIVATE.search(text) or _CONTACT.search(text) or not _mostly_chinese(text):return page
+    if len(re.findall(r'[\u3400-\u9fff]',text))<2*len(lines):return page   # a line that is not Chinese is not a translation
+    return '本章重點'+('：'+title if title else '')+'\n\n'+text
+
 # Key points once borrowed lines from the chapters around a chapter; those pages are written again.
 _BORROWED=('From the chapters around it','前後章節的相關重點')
 
@@ -922,9 +955,18 @@ def _stale_lecture(unit):
     borrowed from another chapter, or a lecture written from neighbours that may belong to another PDF."""
     script=unit.get('script') or ''
     if unit.get('source_blocked') or unit.get('script_status')!='ready' or not script:return False
-    if unit.get('script_kind')=='source_excerpts':return bool(_CONTACT.search(script)) or any(mark in script for mark in _BORROWED)
+    if unit.get('script_kind')=='source_excerpts':
+        body=_page_body(script)
+        return bool(_CONTACT.search(script)) or any(mark in script for mark in _BORROWED) or bool(body and not _mostly_chinese(body))
     if unit.get('script_kind')=='context':return unit.get('script_context')!='same-pdf'
     return False
+
+def ordered_units(man):
+    """The course's units in the order the teacher arranged them. The stored list keeps the order the pages
+    were read in (preparation addresses units by position), so the arrangement is a separate list of ids."""
+    units=list((man or {}).get('units') or [])
+    rank={uid:n for n,uid in enumerate((man or {}).get('unit_order') or [])}
+    return sorted(units,key=lambda unit:rank.get(unit.get('id'),len(rank)))
 
 _OVERVIEW_ZH_WHOLE=re.compile(r'整本|整門|整个|整個|整堂|這本|这本|這門|这门|這份|这份|這堂|这堂|這個課程|这个课程|這個教材|这个教材|這套|本課程|本教材|本書|這學期|這個課')
 _OVERVIEW_ZH_ASK=re.compile(r'講什麼|講甚麼|講些什麼|說什麼|在講|內容|大概|主要|介紹|概述|概要|重點|大綱|章節|目錄|主題|有哪些|學什麼|學甚麼|教什麼|教甚麼')
@@ -1954,7 +1996,7 @@ class CourseManager(object):
                 if final:
                     # Not written this time: the chapter's key points now, never a wait. A written lecture
                     # replaces them if new material for the chapter arrives.
-                    stand_in=_key_points_lecture(unit,own)
+                    stand_in=_zh_key_points(unit,own,model_key,model_call)
                     with guard:state['completed']+=1
                     self._update_manifest(cid,lambda m,n=i,value=stand_in:m['units'][n].update({
                         'script':value,'script_status':'ready','script_error':'','script_review_revision':REVIEW_REVISION,
@@ -1967,7 +2009,7 @@ class CourseManager(object):
                     'script_attempts':a,'script_failure':kind}))
 
             def excerpt(i):
-                unit=units[i];text=_key_points_lecture(unit,grouped.get(unit['id'],[]))
+                unit=units[i];text=_zh_key_points(unit,grouped.get(unit['id'],[]),model_key,model_call)
                 with guard:state['completed']+=1
                 self._update_manifest(cid,lambda m,n=i,value=text,evidence=fingerprint(unit):m['units'][n].update({
                     'script':value,'script_status':'ready','script_error':'','script_review_revision':REVIEW_REVISION,
@@ -2380,6 +2422,35 @@ class CourseManager(object):
         if not p.exists():return None
         return json.loads(p.read_text(encoding='utf-8'))
 
+    def edit_units(self,course_id,titles=None,order=None):
+        """Rename units and/or arrange their order (teacher). Preparation addresses units by position in the
+        stored list, so only titles change there; the arrangement is the separate `unit_order` list."""
+        man=self.manifest(course_id)
+        if not man:raise ValueError('course not found')
+        ids=[u['id'] for u in man.get('units') or []]
+        renames={}
+        if titles is not None:
+            if not isinstance(titles,dict):raise ValueError('Unit names must be given as a list of id and name.')
+            for uid,value in titles.items():
+                if uid not in ids:raise ValueError('Selected unit not found.')
+                name=_clean_text(value)[:160]
+                if not name:raise ValueError('Every unit needs a name.')
+                renames[uid]=name
+        if order is not None:
+            if not isinstance(order,list) or sorted(str(x) for x in order)!=sorted(ids):
+                raise ValueError('The new order must list every unit exactly once.')
+            order=[str(x) for x in order]
+        def change(current):
+            for unit in current.get('units') or []:
+                name=renames.get(unit['id'])
+                if not name or name==unit.get('title'):continue
+                old=str(unit.get('title') or '');script=str(unit.get('script') or '')
+                first,sep,rest=script.partition('\n')
+                if old and old in first:unit['script']=first.replace(old,name,1)+sep+rest   # the page's own heading shows the unit name
+                unit['title']=name
+            if order is not None:current['unit_order']=order
+        return self._update_manifest(course_id,change)
+
     def delete_course(self,course_id):
         """Delete at any time; running preparation stops at its next model step."""
         cid=str(course_id or '').strip()
@@ -2457,7 +2528,7 @@ class CourseManager(object):
                 if line:
                     row=json.loads(line);grouped.setdefault(row.get('unit_id'),[]).append(row)
         parts=['Course: %s'%(man.get('course_name') or 'Uploaded Course'),'Chapters in order:'];used=sum(len(x) for x in parts)
-        for index,unit in enumerate(man.get('units') or [],1):
+        for index,unit in enumerate(ordered_units(man),1):
             if unit.get('source_blocked'):continue
             gist=_unit_gist(unit,grouped.get(unit['id'],[]))
             row='%s. %s%s'%(index,unit.get('title') or 'Chapter %s'%index,(' — '+gist) if gist else '')
@@ -2558,7 +2629,7 @@ class CourseManager(object):
         per=int(per_unit)
         if per<1 or per>10:raise ValueError('Select 1 to 10 questions per unit.')
         banks=json.loads(qp.read_text(encoding='utf-8'));items=[];summary=[]
-        units=man.get('units',[]);started=time.monotonic()
+        units=ordered_units(man);started=time.monotonic()
         if unit_ids is not None:
             if not isinstance(unit_ids,list) or not unit_ids or len(unit_ids)>len(units):
                 raise ValueError('Select at least one course unit to practise.')

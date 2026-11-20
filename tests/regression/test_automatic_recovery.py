@@ -64,8 +64,13 @@ with tempfile.TemporaryDirectory() as temporary:
     build_course(folder,manager)
 
     # -- lectures: escalation and parallel chapters -------------------------
-    guard=threading.Lock();seen={'active':0,'peak':0,'calls':[],'budgets':set()}
+    guard=threading.Lock();seen={'active':0,'peak':0,'calls':[],'budgets':set(),'key_points':[],'key_point_mode':'chinese'}
     def model_call(key,system,user,budget):
+        if system==cr.KEY_POINT_SYSTEM:   # the short call that puts a chapter's key points into Chinese
+            with guard:seen['key_points'].append((user,budget))
+            if seen['key_point_mode']=='chinese':return '- 肺泡通氣量與血流量的比例決定氣體交換的效率\n- 氧氣由肺泡氣體擴散進入肺微血管血液'
+            if seen['key_point_mode']=='english':return '- Ventilation matches perfusion in healthy lungs\n- Oxygen diffuses into blood'
+            raise RuntimeError('model busy')
         unit=next(name for name in ('Respiration 1','Respiration 2','Respiration 3') if name in user)
         with guard:
             seen['active']+=1;seen['peak']=max(seen['peak'],seen['active'])
@@ -86,7 +91,8 @@ with tempfile.TemporaryDirectory() as temporary:
     # A chapter the model cannot write ends with its own key points in the same pass: no waiting, no retries.
     third=units['unit3']
     assert third['script_status']=='ready' and third['script_kind']=='source_excerpts',third
-    assert third['script'].startswith('Key points from the course material') and 'Oxygen diffuses from alveolar gas' in third['script']
+    assert third['script'].startswith('本章重點：Respiration 3') and '- 肺泡通氣量與血流量的比例決定氣體交換的效率' in third['script'] and not cr._stale_lecture(third),third['script']
+    assert len(seen['key_points'])==1 and 'Oxygen diffuses from alveolar gas' in seen['key_points'][0][0] and seen['key_points'][0][1]==1600,seen['key_points']   # translated from the chapter's own slide text
     assert 'page' not in third['script'].lower()
     lectures=manager.manifest('course')['preparation']['lectures']
     assert lectures['status']=='ready' and lectures['completed_units']==3 and not lectures['error'],lectures
@@ -405,7 +411,9 @@ with tempfile.TemporaryDirectory() as temporary:
     assert ('lectures',) in started,'key points are replaced by a written lecture when new material arrives'
     del manager._start_preparation
 
-    # A slide chapter whose lecture the model keeps rejecting still ends with its own slide points.
+    # A slide chapter whose lecture the model keeps rejecting still ends with its own slide points
+    # (the model is busy for the short Chinese call here: the page keeps the slides' own words).
+    seen['key_point_mode']='busy'
     manager._update_manifest('course',lambda m:m['units'][2].update(script_status='error',script='',script_failure='content',script_attempts=1,script_evidence=None,script_kind=None))
     rows=[json.loads(x) for x in (folder_course/'chunks.jsonl').read_text(encoding='utf-8').splitlines() if x]
     for row in rows:
@@ -440,6 +448,34 @@ with tempfile.TemporaryDirectory() as temporary:
     assert lecture_calls()==0
     fixed=manager.manifest('course')['units'][0]
     assert 'chapters around' not in fixed['script'] and fixed['script_kind']=='source_excerpts',fixed
+    # Key points are put into Chinese by one short call. A busy or careless model leaves the page in the slides' own
+    # words (never a wait), and that page is made Chinese at the next start; Chinese slides need no call.
+    topic={'id':'unit9','title':'Transcriptome'}
+    slides=[{'text':'Transcription\nRNA polymerase\nPromoter\nmRNA\nSplicing\nIntrons and exons\nEnhancers'}]
+    asked=[]
+    def zh_model(key,system,user,budget):
+        asked.append(user);return '- 轉錄由 RNA polymerase 啟動\n- 啟動子 (Promoter) 與增強子 (Enhancers) 調控基因表現\n\n- 剪接 (Splicing) 移除內含子 (introns)'
+    def as_unit(page):return {'id':'x','script':page,'script_status':'ready','script_kind':'source_excerpts'}
+    page=cr._zh_key_points(topic,slides,'gemma',zh_model)
+    assert page.startswith('本章重點：Transcriptome\n\n- 轉錄由 RNA polymerase 啟動\n- 啟動子') and page.count('\n- ')==3 and not cr._stale_lecture(as_unit(page)),page
+    assert 'Promoter' in asked[0] and 'Enhancers' in asked[0],'the model is given the chapter\'s own slide text'
+    def busy(*a):raise RuntimeError('model busy')
+    for model in (busy,lambda *a:'- Ventilation matches perfusion\n- Oxygen diffuses into blood',lambda *a:'- 轉錄\n- Promoter and enhancers control genes',lambda *a:'好的，以下是整理：\n- '+'\ue000'*8,None):
+        page=cr._zh_key_points(topic,slides,'gemma',model) if model else cr._zh_key_points(topic,slides,'gemma',None)
+        assert page.startswith('Slide points from the course material') and 'RNA polymerase' in page and cr._stale_lecture(as_unit(page)),page
+    asked.clear()
+    chinese_slides=[{'text':'轉錄是以 DNA 為模板合成 RNA 的過程\n啟動子位於基因的上游\n剪接會移除內含子\n增強子可以提高轉錄效率'}]
+    page=cr._zh_key_points(topic,chinese_slides,'gemma',zh_model)
+    assert not asked and '增強子可以提高轉錄效率' in page and not cr._stale_lecture(as_unit(page)),'Chinese slides need no model call'
+    assert not cr._stale_lecture({'id':'x','script':'Key points from the course material: Transcriptome','script_status':'ready','script_kind':'source_excerpts'}),'a page with only a title is not retried at every start'
+    # A saved English key-points page is made Chinese by that one call, without writing the lecture again.
+    seen['key_point_mode']='chinese'
+    manager._update_manifest('course',lambda m:(m['units'][1].update(script='Key points from the course material: Respiration 2\n\n- Oxygen diffuses from alveolar gas into blood',script_status='ready',
+        script_kind='source_excerpts',script_review_revision=cr.REVIEW_REVISION,script_evidence=fingerprint_of('unit2')),m['preparation']['lectures'].update(status='partial',completed_units=2,total_units=3)))
+    before=len(seen['key_points'])
+    assert lecture_calls()==0,'no lecture is written again for it'
+    chinese_page=manager.manifest('course')['units'][1]
+    assert chinese_page['script'].startswith('本章重點：Respiration 2') and len(seen['key_points'])>before,chinese_page['script']   # (any other English page is put into Chinese in the same pass)
     # After a restart, a finished course whose saved pages hold another chapter's lines is queued again
     # (a "ready" step is otherwise never visited), and a clean course is left alone.
     manager._update_manifest('course',lambda m:(m['units'][0].update(script=borrowed,script_status='ready',script_kind='source_excerpts',script_review_revision=cr.REVIEW_REVISION,
@@ -449,10 +485,28 @@ with tempfile.TemporaryDirectory() as temporary:
     try:
         manager.resume_pending(model_call)
         assert queued==['course'] and manager.manifest('course')['preparation']['lectures']['status']=='partial',queued
-        manager._update_manifest('course',lambda m:(m['units'][0].update(script=CHINESE,script_kind='written'),m['preparation']['lectures'].update(status='ready'),m.update(status='ready')))
+        manager._update_manifest('course',lambda m:([u.update(script=CHINESE,script_kind='written',script_status='ready') for u in m['units']],m['preparation']['lectures'].update(status='ready'),m.update(status='ready')))
         queued.clear();manager.resume_pending(model_call)
         assert manager.manifest('course')['preparation']['lectures']['status']=='ready','clean lecture pages are not queued again'
     finally:manager._start_preparation,manager.supervise=real_start,real_supervise
+
+    # The teacher renames units and arranges their order after the build. Preparation addresses units by position in
+    # the stored list, so that list never moves: the arrangement is a separate list of ids that the overview, the
+    # practice questions and the page follow.
+    ids=[u['id'] for u in manager.manifest('course')['units']];assert len(ids)>=3,ids
+    manager._update_manifest('course',lambda m:m['units'][0].update(script='Key points from the course material: Respiration 1\n\n- point',script_kind='source_excerpts',script_status='ready'))
+    edited=manager.edit_units('course',{ids[0]:'  Transcriptome  '},[ids[2],ids[0],ids[1]]+ids[3:])
+    assert [u['id'] for u in edited['units']]==ids,'the stored list is not reordered'
+    assert edited['units'][0]['title']=='Transcriptome' and edited['units'][0]['script'].startswith('Key points from the course material: Transcriptome\n\n- point'),edited['units'][0]
+    assert [u['id'] for u in cr.ordered_units(edited)]==[ids[2],ids[0],ids[1]]+ids[3:]
+    chapters=manager.overview_context('course').splitlines()
+    assert chapters[2].startswith('1. '+edited['units'][2]['title']) and chapters[3].startswith('2. Transcriptome'),chapters
+    for bad in ({'titles':{'missing':'x'}},{'titles':{ids[0]:'   '}},{'order':ids[:-1]},{'order':ids+[ids[0]]},{'order':'nope'}):
+        try:manager.edit_units('course',bad.get('titles'),bad.get('order'));raise AssertionError('accepted '+str(bad))
+        except ValueError:pass
+    assert manager.manifest('course')['units'][0]['title']=='Transcriptome' and manager.manifest('course')['unit_order'][0]==ids[2],'a refused change leaves the course as it was'
+    try:manager.edit_units('no-such-course',None,None);raise AssertionError('unknown course')
+    except ValueError:pass
 
     # A context lecture saved before neighbours were limited to one PDF may hold another topic: it is made again once.
     manager._update_manifest('course',lambda m:(m['units'][0].update(script=CHINESE,script_status='ready',script_kind='context',script_context=None),

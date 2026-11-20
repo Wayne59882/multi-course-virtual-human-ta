@@ -83,7 +83,7 @@ STATUS_LABEL = {'pending': '審核中 Pending', 'approved': '已核准 Approved'
 # Course functions only teachers may call (upload, build, delete, regenerate).
 TEACHER_ONLY = {'course-upload-chunk', 'course-upload-status', 'course-inspect', 'course-stage-status', 'course-builds',
                 'course-build', 'course-job-status', 'course-build-cancel', 'course-delete', 'course-retry-preparation',
-                'course-expand-questions'}
+                'course-expand-questions', 'course-edit-units'}
 PUBLIC_API = {'/api/health', '/api/reference/health', '/api/kb/health'}
 # Pages that open the application; everything else under web/ is a static asset.
 GATED_PAGES = {'/', '/index.html', '/reference', '/reference/', '/reference/index.html',

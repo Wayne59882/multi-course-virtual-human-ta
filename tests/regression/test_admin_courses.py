@@ -42,7 +42,7 @@ with tempfile.TemporaryDirectory() as temporary:
     auth._exec('INSERT INTO jobs(job_id,owner_id,course_id,created_at) VALUES(?,?,?,?)', ('advisor-job', 2, 'genomic-1', time.time()))
 
     # The administrator can open, delete, retry and watch the advisor's course, upload and build.
-    for seg, body, query in [('course-delete', {'course_id': 'genomic-1'}, ''), ('course-retry-preparation', {'course_id': 'genomic-1'}, ''),
+    for seg, body, query in [('course-delete', {'course_id': 'genomic-1'}, ''), ('course-retry-preparation', {'course_id': 'genomic-1'}, ''), ('course-edit-units', {'course_id': 'genomic-1'}, ''),
                              ('course-status', None, 'id=genomic-1'), ('course-stage-status', None, 'stage_id=advisor-stage'),
                              ('course-job-status', None, 'id=advisor-job'), ('course-build-cancel', {'id': 'advisor-job'}, '')]:
         denial, _ = call(admin, seg, body, query)

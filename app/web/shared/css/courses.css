@@ -53,3 +53,11 @@
 .v241-build .v241-prep-label{font-weight:600;color:#42617e;overflow-wrap:anywhere}
 .v241-build .v241-prep-head small{font-weight:500;color:#6b7f93;margin-left:4px}
 .v241-build-cancel{font:inherit;font-size:12px!important;font-weight:700!important;border:1px solid #e3b4b4!important;background:#fff;color:#a12d2d;border-radius:8px!important;padding:3px 9px!important;box-shadow:none!important;cursor:pointer;min-height:0!important}
+.v241-unit-editor{margin-top:12px;border:1px solid #d8e4ef;border-radius:10px;background:#f8fbff;padding:12px}
+.v241-edit-row{display:grid;grid-template-columns:auto auto minmax(160px,1fr) auto;align-items:center;gap:9px;border:1px solid #d8e4ef;border-radius:9px;background:#fff;padding:8px;margin-bottom:6px}
+.v241-edit-move{display:inline-flex;gap:4px;margin-left:8px;vertical-align:middle}
+.v241-edit-move button{min-width:34px;min-height:34px;padding:2px 8px}
+.v241-edit-no{font-size:12px;font-weight:750;color:#365878;white-space:nowrap}
+.v241-edit-row input.v241-edit-name{border:1px solid #c5d6e7;border-radius:7px;background:#fbfdff;padding:6px 8px;min-width:0}
+@media(max-width:780px){.v241-edit-row{grid-template-columns:auto 1fr}.v241-edit-row .v241-unit-meta{grid-column:1/-1}}
+.vq-role-student #v241EditUnits,.vq-role-student #v241UnitEditor{display:none!important}

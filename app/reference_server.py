@@ -1850,6 +1850,14 @@ class Handler(SharedAssetsMixin, SimpleHTTPRequestHandler):
             except ValueError as e:self.send_json(400,{'ok':False,'error':str(e)})
             except Exception as e:self.send_json(500,{'ok':False,'error':'Quiz result could not be saved','detail':str(e)})
             return
+        if self.path=='/api/reference/course-edit-units':
+            try:
+                req=self.read_json()
+                result=COURSES.edit_units(str(req.get('course_id') or ''),req.get('titles'),req.get('order'))
+                self.send_json(200,{'ok':True,'manifest':result})
+            except ValueError as e:self.send_json(400,{'ok':False,'error':str(e)})
+            except Exception as e:self.send_json(500,{'ok':False,'error':'Units could not be updated','detail':str(e)})
+            return
         if self.path=='/api/reference/course-delete':
             try:
                 req=self.read_json()

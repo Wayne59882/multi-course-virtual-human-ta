@@ -104,6 +104,7 @@ def main():
         ('Durable work steps and CPU work budget', [sys.executable,str(TESTS / 'test_work_steps.py')]),
         ('Chapter preparation pipeline and recovery', [sys.executable,str(TESTS / 'test_chapter_pipeline.py')]),
         ('Preparation progress without image row', [node,str(TESTS / 'test_preparation_progress.cjs')]),
+        ('Arranged unit order', [node,str(TESTS / 'test_unit_order.cjs')]),
         ('Students first: grace period and background timeout', [sys.executable,str(TESTS / 'test_step_scheduling.py')]),
         ('Students and course preparation share the GPU', [sys.executable,str(TESTS / 'test_gpu_sharing.py')]),
         ('Automatic recovery and parallel chapters', [sys.executable,str(TESTS / 'test_automatic_recovery.py')]),
